@@ -2,15 +2,39 @@
 const main = document.querySelector('#main');
 const dialog = document.querySelector('#dialog');
 const storageKey = 'gestion-riesgos-v1';
+const catalogLabels = {
+  people: 'Analistas de riesgos',
+  researchers: 'Analistas de investigación',
+  departments: 'Dependencias solicitantes',
+  types: 'Tipos de caso'
+};
+const typeDetails = {
+  matrix: 'Matriz',
+  research: 'Investigación',
+  followup: 'Seguimiento'
+};
 const initial = {
   people: ['Luis Menendez', 'Julio Hernández', 'Renato Escobar', 'Roger González', 'Andrés López']
     .map((name, index) => ({ id: String(index + 1), name, active: true })),
+  researchers: [
+    { id: 'william', name: 'William Espinoza', active: true },
+    { id: 'victor', name: 'Victor de León', active: true }
+  ],
+  departments: [
+    { id: 'dit', name: 'Departamento de Infraestructura Tecnológica', active: true },
+    { id: 'dgpt', name: 'Departamento de Gestión de Proyectos Tecnológicos', active: true }
+  ],
+  types: [
+    { id: 'matrix', name: 'Matriz de Riesgos', mode: 'matrix', active: true },
+    { id: 'research', name: 'Investigación con Matriz de Riesgos', mode: 'research', active: true },
+    { id: 'followup', name: 'Seguimiento de Matriz de Riesgos', mode: 'followup', active: true }
+  ],
   cases: []
 };
 let data;
 let storageError = false;
 try {
-  data = JSON.parse(localStorage.getItem(storageKey)) ?? initial;
+  data = { ...initial, ...JSON.parse(localStorage.getItem(storageKey)) };
 } catch {
   storageError = true;
   data = initial;
@@ -19,7 +43,7 @@ const views = {
   dashboard: ['Dashboard', 'Consulta la carga de trabajo y los próximos vencimientos.'],
   cases: ['Casos', 'Registra, asigna y actualiza los casos de riesgos.'],
   calendar: ['Calendario', 'Consulta los casos por fecha de plazo.'],
-  people: ['Analistas', 'Administra las opciones de la lista de asignación.']
+  people: ['Catálogos', 'Administra los tipos de caso, responsables y dependencias solicitantes.']
 };
 let view = 'dashboard';
 let selected = today();
@@ -33,7 +57,12 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 })[c]);
 const formatDate = value => dateFormat.format(new Date(value + 'T00:00:00Z'));
-const nameOf = id => data.people.find(person => person.id === id)?.name ?? 'Sin analista';
+const entryOf = (group, id) => data[group].find(entry => entry.id === id);
+const nameOf = id => entryOf('people', id)?.name ?? 'Sin analista';
+const typeOf = record => entryOf('types', record.type ?? 'matrix');
+const catalogOptions = (group, selected) => data[group]
+  .filter(entry => entry.active || entry.id === selected)
+  .map(entry => `<option value="${escape(entry.id)}" ${entry.id === selected ? 'selected' : ''}>${escape(entry.name)}${entry.active ? '' : ' (inactivo)'}</option>`).join('');
 const normalize = value => value.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
 const sortDue = (a, b) => a.due.localeCompare(b.due) || a.number.localeCompare(b.number);
 function today() {
@@ -80,7 +109,10 @@ function caseRows(records, empty) {
     const [label, tone] = status(record);
     return `<article class="case row"><button data-edit-case="${escape(record.id)}"><strong>${escape(record.topic)}</strong>
       <small>Caso ${escape(record.number)} · Oficio ${escape(record.office)}</small>
-      <small>${escape(nameOf(record.person))} · Plazo ${formatDate(record.due)}</small></button>
+      <small>${escape(nameOf(record.person))} · Plazo ${formatDate(record.due)}</small>
+      <small>${escape(typeOf(record)?.name)}${record.department ? ' · ' + escape(entryOf('departments', record.department)?.name) : ''}</small>
+      ${record.researcher ? `<small>Investigación · ${escape(entryOf('researchers', record.researcher)?.name)}</small>` : ''}
+      ${record.origin ? `<small>Oficio de la matriz enviada · ${escape(record.origin)}</small>` : ''}</button>
       <span class="pill ${tone}">${label}</span></article>`;
   }).join('');
 }
@@ -94,7 +126,7 @@ function dashboard() {
 }
 function filteredCases() {
   const matches = data.cases.filter(record => (!filter || record.person === filter) &&
-    normalize([record.topic, record.number, record.office, nameOf(record.person)].join(' ')).includes(normalize(query.trim())));
+    normalize([record.topic, record.number, record.office, nameOf(record.person), typeOf(record)?.name, entryOf('departments', record.department)?.name].join(' ')).includes(normalize(query.trim())));
   main.querySelector('#case-results').innerHTML = caseRows(matches.sort(sortDue), 'No hay casos que coincidan.');
 }
 function cases() {
@@ -107,23 +139,39 @@ function calendar() {
   const leading = (first.getUTCDay() + 6) % 7;
   const count = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).getUTCDate();
   const monthCases = data.cases.filter(record => record.due.slice(0, 7) === month);
+  const entries = record => {
+    const mode = typeOf(record)?.mode ?? 'matrix';
+    return `<button class="event event-${mode}" data-edit-case="${escape(record.id)}">
+      <strong>Oficio ${escape(record.office)}</strong><span>${escape(nameOf(record.person))}</span>
+      <small>${escape(typeOf(record)?.name)}</small></button>`;
+  };
   const cells = Array.from({ length: count }, (_, index) => {
     const day = month + '-' + String(index + 1).padStart(2, '0');
-    const total = monthCases.filter(record => record.due === day).length;
-    return `<button class="day ${day === today() ? 'today' : ''}" data-day="${day}" aria-pressed="${day === selected}"
-      aria-label="${formatDate(day)}, ${total} casos">${index + 1}${total ? `<small>${total} caso${total === 1 ? '' : 's'}</small>` : ''}</button>`;
+    const records = monthCases.filter(record => record.due === day).sort(sortDue);
+    return `<div class="calendar-cell"><button class="day ${day === today() ? 'today' : ''}" data-day="${day}" aria-pressed="${day === selected}"
+      aria-label="${formatDate(day)}, ${records.length} casos">${index + 1}
+      <span class="day-count">${records.length || ''}</span></button><div class="events">${records.map(entries).join('')}</div></div>`;
   }).join('');
   return `<section class="card"><div class="row"><h2>${monthFormat.format(first)}</h2><div class="calendar-actions">
     <button class="action" data-month="-1" aria-label="Mes anterior">‹</button><button class="action" data-today>Hoy</button>
     <button class="action" data-month="1" aria-label="Mes siguiente">›</button></div></div>
+    <div class="legend">${Object.entries(typeDetails).map(([mode, label]) =>
+    `<span class="event-${mode}">${label}</span>`).join('')}</div>
     <div class="calendar">${['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'].map(day => `<span class="weekday">${day}</span>`).join('')}
     ${'<span></span>'.repeat(leading)}${cells}</div><h2 class="section-title">${formatDate(selected)}</h2>
-    ${caseRows(monthCases.filter(record => record.due === selected), 'Sin plazos para este día.')}</section>`;
+    ${caseRows(monthCases.filter(record => record.due === selected), 'Sin plazos para este día.')}
+    <div class="mobile-agenda"><h2>Plazos del mes</h2>${monthCases.length ?
+      [...new Set(monthCases.map(record => record.due))].sort().map(day =>
+        `<section><h3>${formatDate(day)}</h3>${monthCases.filter(record => record.due === day).sort(sortDue).map(entries).join('')}</section>`).join('') :
+      '<p class="empty">Sin plazos para este mes.</p>'}</div></section>`;
 }
 function people() {
-  return `<section class="card"><h2 class="section-title">Lista de asignación</h2>${data.people.map(person =>
-    `<article class="person row"><div><strong>${escape(person.name)}</strong><small>${person.active ? 'Activo' : 'Inactivo'}</small></div>
-    <button class="action" data-edit-person="${escape(person.id)}" aria-label="Editar a ${escape(person.name)}">Editar</button></article>`).join('')}</section>`;
+  return `<div class="catalog-grid">${Object.entries(catalogLabels).map(([group, label]) =>
+    `<section class="card"><div class="row section-title"><h2>${label}</h2>
+      <button class="action" data-catalog="${group}" data-entry="">Añadir</button></div>
+      ${data[group].map(entry => `<article class="person row"><div><strong>${escape(entry.name)}</strong>
+        <small>${entry.active ? 'Activo' : 'Inactivo'}${entry.mode ? ' · ' + typeDetails[entry.mode] : ''}</small></div>
+        <button class="action" data-catalog="${group}" data-entry="${escape(entry.id)}" aria-label="Editar ${escape(entry.name)}">Editar</button></article>`).join('')}</section>`).join('')}</div>`;
 }
 function render() {
   document.querySelectorAll('nav button').forEach(button => {
@@ -131,7 +179,7 @@ function render() {
     else button.removeAttribute('aria-current');
   });
   const [title, description] = views[view];
-  const action = view === 'people' ? '<button class="action primary" data-edit-person="">Añadir analista</button>' :
+  const action = view === 'people' ? '' :
     '<button class="action primary" data-edit-case="">+ Nuevo caso</button>';
   main.innerHTML = `<header><div><div class="eyebrow">Gestión de Riesgos</div><h1>${title}</h1><p>${description}</p></div>${action}</header>
     ${storageError ? '<p class="error">No se pudo abrir el almacenamiento local.</p>' : ''}
@@ -152,6 +200,7 @@ function openForm(title, fields, submit, deleteAttrs = '') {
 function caseEditor(id) {
   const existing = data.cases.find(record => record.id === id);
   const record = existing ?? { assigned: today() };
+  const currentType = existing ? record.type ?? 'matrix' : '';
   const options = data.people.filter(person => person.active || person.id === record.person);
   if (!options.length) {
     notify('Activa o añade un analista antes de asignar un caso.');
@@ -161,37 +210,72 @@ function caseEditor(id) {
   openForm(existing ? 'Editar caso' : 'Nuevo caso', `
     <div class="fields">${field('office', 'Número de oficio', 100)}${field('number', 'Número de caso', 100)}</div>
     ${field('topic', 'Tema', 300)}
+    <label>Tipo de caso<select name="type" required><option value="">Seleccionar tipo</option>${catalogOptions('types', currentType)}</select></label>
+    <label>Dependencia solicitante<select name="department" required><option value="">Seleccionar dependencia</option>${catalogOptions('departments', record.department)}</select></label>
+    <label id="research-field" hidden>Responsable de investigación<select name="researcher"><option value="">Seleccionar responsable</option>${catalogOptions('researchers', record.researcher)}</select></label>
+    <label id="followup-field" hidden>Oficio de la matriz enviada
+      <input name="origin" list="matrix-offices" maxlength="100" value="${escape(record.origin)}" placeholder="Seleccionar o escribir el oficio">
+      <datalist id="matrix-offices">${[...new Set(data.cases.filter(item => item.id !== id && typeOf(item)?.mode !== 'followup').map(item => item.office))]
+      .map(office => `<option value="${escape(office)}"></option>`).join('')}</datalist></label>
     <label>Analista<select name="person" required><option value="">Seleccionar analista</option>${options.map(person =>
     `<option value="${escape(person.id)}" ${record.person === person.id ? 'selected' : ''}>${escape(person.name)}${person.active ? '' : ' (inactivo)'}</option>`).join('')}</select></label>
     <div class="fields"><label>Fecha de asignación<input name="assigned" type="date" required value="${escape(record.assigned)}"></label>
     <label>Fecha de plazo<input name="due" type="date" required value="${escape(record.due)}"></label></div>
     <label>Estado<select name="state"><option value="open">En seguimiento</option><option value="closed" ${record.closed ? 'selected' : ''}>Cerrado</option></select></label>`,
     (form, values) => {
-      const { person, assigned, due, state } = values;
+      const { person, assigned, due, state, type, department } = values;
+      const mode = entryOf('types', type)?.mode;
+      const researcher = mode === 'research' ? values.researcher : '';
+      const origin = mode === 'followup' ? values.origin?.trim() : '';
       const [office, number, topic] = ['office','number','topic'].map(key => values[key].trim());
       const error = form.querySelector('.error');
       if (!office || !number || !topic) { error.textContent = 'Completa el oficio, el número de caso y el tema.'; return; }
+      if (!mode || !entryOf('departments', department)) { error.textContent = 'Selecciona el tipo de caso y la dependencia solicitante.'; return; }
+      if (mode === 'research' && !entryOf('researchers', researcher)) { error.textContent = 'Selecciona el responsable de investigación.'; return; }
+      if (mode === 'followup' && !origin) { error.textContent = 'Indica el oficio de la matriz enviada.'; return; }
       if (due < assigned) { error.textContent = 'El plazo debe ser igual o posterior a la asignación.'; return; }
-      if (data.cases.some(item => item.id !== id && normalize(item.number) === normalize(number))) {
-        error.textContent = 'Ya existe un caso con ese número.'; return;
+      if (data.cases.some(item => item.id !== id && normalize(item.number) === normalize(number) &&
+        (mode === 'followup' ? normalize(item.office) === normalize(office) : typeOf(item)?.mode !== 'followup' || normalize(item.office) === normalize(office)))) {
+        error.textContent = 'Ya existe un registro con el mismo número de caso para esta asignación.'; return;
       }
-      const item = { id: id || crypto.randomUUID(), office, number, topic, person, assigned, due, closed: state === 'closed' };
+      const item = { id: id || crypto.randomUUID(), office, number, topic, person, assigned, due, type, department, researcher, origin, closed: state === 'closed' };
       save({ ...data, cases: existing ? data.cases.map(entry => entry.id === id ? item : entry) : [...data.cases, item] }, 'Caso guardado.');
     }, existing ? `<button type="button" class="action danger" data-delete-case="${escape(id)}">Eliminar</button>` : '');
+  const typeSelect = dialog.querySelector('[name="type"]');
+  const updateFields = () => {
+    const mode = entryOf('types', typeSelect.value)?.mode;
+    for (const [selector, name, condition] of [
+      ['#research-field', 'researcher', mode === 'research'],
+      ['#followup-field', 'origin', mode === 'followup']
+    ]) {
+      const field = dialog.querySelector(selector);
+      const control = field.querySelector(`[name="${name}"]`);
+      field.hidden = !condition;
+      control.disabled = !condition;
+      control.required = condition;
+    }
+  };
+  typeSelect.addEventListener('change', updateFields);
+  updateFields();
 }
-function personEditor(id) {
-  const person = data.people.find(entry => entry.id === id);
-  openForm(person ? 'Editar analista' : 'Añadir analista', `
-    <label>Nombre<input name="name" required maxlength="100" value="${escape(person?.name)}"></label>
-    <label>Disponibilidad<select name="active"><option value="yes">Activo</option><option value="no" ${person?.active === false ? 'selected' : ''}>Inactivo</option></select></label>`,
+function catalogEditor(group, id) {
+  const entry = entryOf(group, id);
+  const modeField = group === 'types' ? `<label>Comportamiento<select name="mode" ${entry ? 'disabled' : ''}>
+    ${Object.entries(typeDetails).map(([mode, label]) =>
+      `<option value="${mode}" ${entry?.mode === mode ? 'selected' : ''}>${label}</option>`).join('')}</select></label>` : '';
+  openForm(entry ? 'Editar opción' : 'Añadir opción', `
+    <label>Nombre<input name="name" required maxlength="150" value="${escape(entry?.name)}"></label>
+    ${modeField}
+    <label>Disponibilidad<select name="active"><option value="yes">Activo</option><option value="no" ${entry?.active === false ? 'selected' : ''}>Inactivo</option></select></label>`,
     (form, values) => {
       const name = values.name.trim();
-      if (!name || data.people.some(entry => entry.id !== id && normalize(entry.name) === normalize(name))) {
-        form.querySelector('.error').textContent = 'Ingresa un nombre válido que no esté en la lista.';
+      if (!name || data[group].some(item => item.id !== id && normalize(item.name) === normalize(name))) {
+        form.querySelector('.error').textContent = 'Ingresa un nombre válido que no esté en este catálogo.';
         return;
       }
       const item = { id: id || crypto.randomUUID(), name, active: values.active === 'yes' };
-      save({ ...data, people: person ? data.people.map(entry => entry.id === id ? item : entry) : [...data.people, item] }, 'Analista guardado.');
+      if (group === 'types') item.mode = entry?.mode ?? values.mode;
+      save({ ...data, [group]: entry ? data[group].map(option => option.id === id ? item : option) : [...data[group], item] }, 'Opción guardada.');
     });
 }
 document.addEventListener('click', event => {
@@ -200,7 +284,7 @@ document.addEventListener('click', event => {
   const { dataset } = button;
   if ('view' in dataset) { view = dataset.view; render(); window.scrollTo(0, 0); }
   if ('editCase' in dataset) caseEditor(dataset.editCase);
-  if ('editPerson' in dataset) personEditor(dataset.editPerson);
+  if ('catalog' in dataset) catalogEditor(dataset.catalog, dataset.entry);
   if ('cancel' in dataset) dialog.close();
   if ('deleteCase' in dataset && confirm('¿Eliminar este caso permanentemente?')) {
     save({ ...data, cases: data.cases.filter(record => record.id !== dataset.deleteCase) }, 'Caso eliminado.');
@@ -227,7 +311,7 @@ main.addEventListener('change', event => {
 });
 window.addEventListener('storage', event => {
   if (event.key === storageKey && event.newValue) {
-    data = JSON.parse(event.newValue);
+    data = { ...initial, ...JSON.parse(event.newValue) };
     if (dialog.open) dialog.close();
     render();
   }
