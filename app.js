@@ -590,6 +590,11 @@ function reportPreview(settings) {
   const {start, cutoff, records, measured, durations, followups, undetermined} = reportData(settings);
   const e = escape;
   const count = key => records.filter(row => row[key]).length;
+  const closedFromPeriod = records.filter(row => row.closed && row.assigned).length;
+  const closedFromEarlier = records.filter(row => row.closed && row.record.assigned && row.record.assigned < start).length;
+  const closedUnknown = count('closed') - closedFromPeriod - closedFromEarlier;
+  const pendingFromPeriod = records.filter(row => row.pending && row.assigned).length;
+  const pendingFromEarlier = count('pending') - pendingFromPeriod;
   const onTime = measured.filter(record => record.closedAt <= record.due).length;
   const average = durations.length ? new Intl.NumberFormat('es-GT',{maximumFractionDigits:1})
     .format(durations.reduce((sum,days) => sum+days,0)/durations.length) : '—';
@@ -597,7 +602,7 @@ function reportPreview(settings) {
   const scope = [settings.person ? nameOf(settings.person) : 'Todo el equipo',
     settings.department ? entryOf('departments',settings.department)?.name : '',
     settings.type ? caseCategories[settings.type] : ''].filter(Boolean).join(' · ');
-  const summary = [['Asignados',count('assigned')],['Finalizados',count('closed')],['Pendientes al corte',count('pending')],
+  const summary = [['Asignados en el mes',count('assigned')],['Finalizados en el mes',count('closed')],['Pendientes al corte',count('pending')],
     ['Vencidos al corte', count('overdue')], ['Pendientes sin plazo',records.filter(row => row.pending && !row.record.due).length],
     ['Cierres a tiempo', measured.length ? onTime + ' de ' + measured.length + ' (' + new Intl.NumberFormat('es-GT',{style:'percent',maximumFractionDigits:1}).format(onTime/measured.length) + ')' : '—'],
     ['Cierres fuera de plazo',measured.length ? measured.length-onTime : '—'],
@@ -605,9 +610,19 @@ function reportPreview(settings) {
   const date = value => value ? e(formatDate(value)) : '—';
   const field = (label,value) => `<span><b>${label}</b> ${value}</span>`;
   return `<article class="report-paper">
-    <header class="report-heading"><div class="eyebrow">Gestión de Riesgos</div><h2>${title}</h2>
-      <p>${e(scope)}</p><p>${date(start)} al ${date(cutoff)} · Generado el ${date(today())}</p></header>
-    <div class="report-stats">${summary.map(([label,value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join('')}</div>
+    <header class="report-heading">
+      <img class="report-logo" src="./icon-192.png" width="52" height="52" alt="">
+      <div><div class="eyebrow">Gestión de Riesgos</div><h2>${title}</h2>
+        <p class="report-scope">${e(scope)}</p><p class="report-period">${date(start)} al ${date(cutoff)} · Emitido el ${date(today())}</p>
+      </div></header>
+    <div class="report-stats">${summary.map(([label,value],index) => `<div class="report-indicator report-indicator-${index}"><span>${label}</span><strong>${value}</strong></div>`).join('')}</div>
+    <section class="report-block report-reconcile"><h3>Cómo se componen los cierres y pendientes</h3>
+      <table><thead><tr><th>Fecha de asignación</th><th>Cierres del mes</th><th>Pendientes al corte</th></tr></thead>
+      <tbody><tr><th scope="row">En el mes</th><td>${closedFromPeriod}</td><td>${pendingFromPeriod}</td></tr>
+      <tr><th scope="row">Antes del mes</th><td>${closedFromEarlier}</td><td>${pendingFromEarlier}</td></tr>
+      ${closedUnknown ? `<tr><th scope="row">Sin fecha de asignación válida para el corte</th><td>${closedUnknown}</td><td>—</td></tr>` : ''}
+      <tr class="report-total"><th scope="row">Total</th><td>${count('closed')}</td><td>${count('pending')}</td></tr></tbody></table>
+    </section>
     <p class="report-note">Asignaciones y cierres se cuentan por sus respectivas fechas. Los pendientes al corte se estiman con las fechas y asignaciones actuales. Los cambios de responsable, reaperturas y eliminaciones pueden modificar un corte anterior. El cumplimiento considera solo cierres con plazo registrado.${undetermined ? ' Hay ' + undetermined + ' casos cerrados sin fecha que quedaron fuera del cálculo de pendientes al corte.' : ''}</p>
     ${settings.person ? '' : reportBreakdown(records,'people','Carga por analista','Analista')}
     ${reportBreakdown(records,'types','Distribución por tipo','Tipo de caso')}
@@ -629,8 +644,8 @@ function reportPreview(settings) {
           ${field('Tipo',e(caseGroupLabel('types',record)))}${field('Caso',e(record.number || '—'))}
           ${field('Analista',e(nameOf(record.person)))}${field('Dependencia',e(caseGroupLabel('departments',record)))}
           ${record.researcher ? field('Investigación',e(entryOf('researchers',record.researcher)?.name || '—')) : ''}
-          ${field('Oficio de ingreso',e(record.office || '—'))}${field('Oficio de respuesta',e(record.responseOffice || '—'))}
-          ${field('Asignado',date(record.assigned))}${field('Plazo',date(record.due))}${field('Cierre',date(record.closedAt))}
+          ${field('Oficio de ingreso',e(record.office || '—'))}${field('Oficio de respuesta',e((record.closedAt && record.closedAt > cutoff ? '' : record.responseOffice) || '—'))}
+          ${field('Asignado',date(record.assigned))}${field('Plazo',date(record.due))}${field('Cierre al corte',date(record.closedAt > cutoff ? '' : record.closedAt))}
           ${caseMode(record) === 'followup' && record.matrix ? field('Matriz de origen',e(record.matrix)) : ''}
           ${record.origin ? field('Oficio de la matriz enviada',e(record.origin)) : ''}
         </div>${settings.notes && record.notes ? `<p class="report-notes"><b>Observaciones</b> ${e(record.notes)}</p>` : ''}</div>`).join('') :
@@ -1306,7 +1321,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=16');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=17');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;

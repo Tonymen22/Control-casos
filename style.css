@@ -199,3 +199,19 @@ button.dashboard-chart-action .chart-caption>span{color:inherit;text-decoration:
   .report-block thead{display:table-header-group}
   .report-block h3{break-after:avoid}
 }
+
+.report-paper .report-heading{display:grid;grid-template-columns:auto minmax(0,1fr);justify-content:start;align-items:center;gap:12px;border:1px solid #b7cfed;border-inline-start:5px solid #225a9f;border-bottom:1px solid #b7cfed;border-radius:9px;background:#eaf3ff;padding:13px 16px;margin:0 0 14px}
+.report-logo{display:block;border-radius:11px;width:52px;height:52px}
+.report-heading .eyebrow{color:#1c528c}
+.report-heading h2{color:#153969}
+.report-heading .report-scope{font-weight:700;color:#23486d}
+.report-heading .report-period{font-size:.83rem;color:#314d71}
+.report-stats .report-indicator{border-top:3px solid #426bad}
+.report-stats :is(.report-indicator-1,.report-indicator-5){background:#e5f5ec;border-top-color:#227858}
+.report-stats :is(.report-indicator-2,.report-indicator-4){background:#fff4df;border-top-color:#98701c}
+.report-stats :is(.report-indicator-3,.report-indicator-6){background:#fbeef0;border-top-color:#a84859}
+.report-reconcile td,.report-reconcile thead th:not(:first-child){text-align:center}
+.report-total{font-weight:700;background:#eaf2fc}
+@media print{
+  .report-heading,.report-stats,.report-reconcile{break-inside:avoid}
+}
