@@ -53,3 +53,6 @@ main.gated{margin:0;max-width:none;display:grid;min-height:100dvh;place-items:ce
 .dashboard-table td{text-align:center}
 .import-errors{max-height:200px;overflow:auto;padding-left:20px}
 textarea{box-sizing:border-box;resize:vertical;font:inherit;border:1px solid #ccd7ea;border-radius:11px;padding:10px;color:inherit}
+
+.selected-events{display:grid;gap:6px;margin-bottom:15px}
+.event.closure-event{border-left-style:double;border-left-width:5px}

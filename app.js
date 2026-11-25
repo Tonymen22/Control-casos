@@ -52,7 +52,7 @@ const sessionBar = document.querySelector('#session');
 const views = {
   dashboard: ['Dashboard', 'Consulta la carga de trabajo y los próximos vencimientos.'],
   cases: ['Casos', 'Registra, asigna y actualiza los casos de riesgos.'],
-  calendar: ['Calendario', 'Consulta los casos por fecha de plazo.'],
+  calendar: ['Calendario', 'Consulta los plazos y las fechas de cierre.'],
   people: ['Catálogos', 'Administra los tipos de caso, responsables y dependencias solicitantes.']
 };
 let view = 'dashboard';
@@ -301,18 +301,28 @@ function calendar() {
   const first = new Date(month + '-01T00:00:00Z');
   const leading = (first.getUTCDay() + 6) % 7;
   const count = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).getUTCDate();
-  const monthCases = data.cases.filter(record => record.due?.slice(0, 7) === month);
-  const entries = record => {
+  const byDate = new Map();
+  for (const record of data.cases) {
+    for (const [date, label] of [[record.due, 'Plazo'], [record.closed && record.closedAt, 'Cierre']]) {
+      if (!date || date.slice(0, 7) !== month) continue;
+      if (!byDate.has(date)) byDate.set(date, []);
+      byDate.get(date).push({record, label});
+    }
+  }
+  for (const events of byDate.values()) events.sort((a,b) => a.label === b.label ? sortDue(a.record,b.record) : a.label === 'Plazo' ? -1 : 1);
+  const entries = ({record, label}) => {
     const mode = typeOf(record)?.mode ?? 'matrix';
-    return `<button class="event event-${mode}" data-edit-case="${escape(record.id)}">
-      <strong>${record.office ? 'Oficio ' + escape(record.office) : escape(record.matrix || record.number || 'Sin oficio de ingreso')}</strong><span>${escape(nameOf(record.person))}</span>
+    const office = label === 'Cierre' ? record.responseOffice : record.office;
+    const reference = office || record.matrix || record.number || 'Sin oficio';
+    return `<button class="event event-${mode} ${label === 'Cierre' ? 'closure-event' : ''}" data-edit-case="${escape(record.id)}">
+      <strong>${label} · ${escape(reference)}</strong><span>${escape(nameOf(record.person))}</span>
       <small>${escape(typeOf(record)?.name)}</small></button>`;
   };
   const cells = Array.from({ length: count }, (_, index) => {
     const day = month + '-' + String(index + 1).padStart(2, '0');
-    const records = monthCases.filter(record => record.due === day).sort(sortDue);
+    const records = byDate.get(day) ?? [];
     return `<div class="calendar-cell"><button class="day ${day === today() ? 'today' : ''}" data-day="${day}" aria-pressed="${day === selected}"
-      aria-label="${formatDate(day)}, ${records.length} casos">${index + 1}
+      aria-label="${formatDate(day)}, ${records.length} eventos">${index + 1}
       <span class="day-count">${records.length || ''}</span></button><div class="events">${records.map(entries).join('')}</div></div>`;
   }).join('');
   return `<section class="card"><div class="row"><h2>${monthFormat.format(first)}</h2><div class="calendar-actions">
@@ -322,11 +332,11 @@ function calendar() {
     `<span class="event-${mode}">${label}</span>`).join('')}</div>
     <div class="calendar">${['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'].map(day => `<span class="weekday">${day}</span>`).join('')}
     ${'<span></span>'.repeat(leading)}${cells}</div><h2 class="section-title">${formatDate(selected)}</h2>
-    ${caseRows(monthCases.filter(record => record.due === selected), 'Sin plazos para este día.')}
-    <div class="mobile-agenda"><h2>Plazos del mes</h2>${monthCases.length ?
-      [...new Set(monthCases.map(record => record.due))].sort().map(day =>
-        `<section><h3>${formatDate(day)}</h3>${monthCases.filter(record => record.due === day).sort(sortDue).map(entries).join('')}</section>`).join('') :
-      '<p class="empty">Sin plazos para este mes.</p>'}</div></section>`;
+    <div class="selected-events">${byDate.has(selected) ? byDate.get(selected).map(entries).join('') : '<p class="empty">Sin plazos ni cierres para este día.</p>'}</div>
+    <div class="mobile-agenda"><h2>Plazos y cierres del mes</h2>${byDate.size ?
+      [...byDate.keys()].sort().map(day =>
+        `<section><h3>${formatDate(day)}</h3>${byDate.get(day).map(entries).join('')}</section>`).join('') :
+      '<p class="empty">Sin plazos ni cierres para este mes.</p>'}</div></section>`;
 }
 function people() {
   return `<div class="catalog-grid">${Object.entries(catalogLabels).map(([group, label]) =>
@@ -485,6 +495,20 @@ function caseEditor(id) {
   typeSelect.addEventListener('change', updateFields);
   updateFields();
 }
+function decodeCsv(bytes) {
+  const bom = new Uint8Array(bytes, 0, Math.min(2, bytes.byteLength));
+  const encoding = bom[0] === 255 && bom[1] === 254 ? 'utf-16le'
+    : bom[0] === 254 && bom[1] === 255 ? 'utf-16be' : 'utf-8';
+  let text;
+  try {
+    text = new TextDecoder(encoding, {fatal:true}).decode(bytes);
+  } catch (error) {
+    if (encoding !== 'utf-8') throw error;
+    text = new TextDecoder('windows-1252').decode(bytes);
+  }
+  if (text.includes('�')) throw new Error('El archivo ya contiene caracteres dañados (�). Exporta otra vez desde el Excel original como CSV UTF-8.');
+  return text;
+}
 function csvRows(text) {
   const source = text.replace(/^\uFEFF/, '');
   const header = source.split(/\r?\n/, 1)[0];
@@ -530,7 +554,7 @@ function prepareImport(text) {
     assigned:['fecha ingreso'], number:['# de caso','número de caso'], matrix:['no. matriz','número de matriz'],
     topic:['nombre de la matriz de riesgo','tema'], closedAt:['respuesta','fecha de respuesta','fecha de cierre'],
     responseOffice:['oficio de respuesta'], analyst:['designado principal','analista'], state:['estado'],
-    office:['oficio de ingreso'], due:['fecha de plazo','plazo'], department:['dependencia solicitante'], notes:['observaciones']
+    office:['oficio de ingreso','oficio de solicitud'], due:['fecha de plazo','plazo'], department:['dependencia solicitante'], notes:['observaciones']
   };
   const positions = Object.fromEntries(Object.entries(columns).map(([name, labels]) => [name, keys.findIndex(value => labels.map(key).includes(value))]));
   if (positions.responseOffice < 0) {
@@ -540,8 +564,10 @@ function prepareImport(text) {
   const required = ['assigned','number','matrix','topic','closedAt','responseOffice','analyst','state'];
   const absent = required.filter(name => positions[name] < 0);
   if (absent.length) throw new Error('Faltan columnas: ' + absent.map(name => columns[name][0]).join(', ') + '.');
-  const seen = new Set(data.cases.map(record => normalize(record.matrix ?? '')).filter(Boolean));
-  const accepted = [], issues = [];
+  const existing = new Map(data.cases.filter(record => record.matrix).map(record => [normalize(record.matrix), record]));
+  const seen = new Set();
+  const accepted = [], issues = [], repairs = new Map();
+  const textFields = ['topic', 'notes', 'office', 'responseOffice'];
   let duplicates = 0, historicalWithoutOffice = 0;
   rows.forEach((row, index) => {
     const get = name => row[positions[name]]?.trim() ?? '';
@@ -549,6 +575,26 @@ function prepareImport(text) {
     const topic = get('topic');
     const analyst = get('analyst');
     if (!matrix && !topic && !analyst) return;
+    const matrixKey = normalize(matrix);
+    if (matrixKey && seen.has(matrixKey)) { duplicates++; return; }
+    if (matrixKey) seen.add(matrixKey);
+    const stored = existing.get(matrixKey);
+    if (stored) {
+      const changes = {};
+      if (stored.historical) for (const field of textFields) {
+        const previous = stored[field] ?? '';
+        const original = get(field);
+        const characters = [...previous];
+        const candidates = [...original];
+        if (previous.includes('�') && characters.length === candidates.length &&
+            characters.every((character, index) => character === '�' || character === candidates[index])) {
+          changes[field] = original;
+        }
+      }
+      if (Object.keys(changes).length) repairs.set(stored.id, changes);
+      else duplicates++;
+      return;
+    }
     const assigned = importDate(get('assigned'));
     const closedAt = importDate(get('closedAt'));
     const due = importDate(get('due'));
@@ -565,30 +611,30 @@ function prepareImport(text) {
       : closed && !closedAt ? 'Completa la fecha de respuesta del caso entregado.'
       : !closed && (closedAt || actualOffice(get('responseOffice'))) ? 'El caso está abierto y contiene datos de respuesta.'
       : '';
-    if (seen.has(normalize(matrix))) { duplicates++; return; }
     if (error) { issues.push('Fila ' + (index + 2) + (matrix ? ' (' + matrix + ')' : '') + ' · ' + error); return; }
-    seen.add(normalize(matrix));
     const responseOffice = closed ? get('responseOffice') : '';
     if (closed && !actualOffice(responseOffice)) historicalWithoutOffice++;
     accepted.push({ id: crypto.randomUUID(), matrix, number: missingValue(get('number')), topic, person: person.id,
       assigned, due, department: department?.id ?? '', office: missingValue(get('office')), type:'matrix',
       closed, closedAt: closed ? closedAt : '', responseOffice, notes: get('notes'), historical: true });
   });
-  return { accepted, issues, duplicates, historicalWithoutOffice };
+  return { accepted, issues, duplicates, historicalWithoutOffice, repairs };
 }
 function openCsvImport() {
   openForm('Importar Excel', `
     <p>Guarda tu hoja como CSV UTF-8 en Excel. Revisa el resultado antes de importar.</p>
     <label>Archivo CSV<input name="csv" type="file" accept=".csv,text/csv" required></label>
     <div id="csv-preview" aria-live="polite"></div>`, (form) => {
-      if (!preview?.accepted.length) return;
-      void save({ ...data, cases: [...data.cases, ...preview.accepted] }, `${preview.accepted.length} casos importados.`);
+      if (!preview || (!preview.accepted.length && !preview.repairs.size)) return;
+      const repaired = data.cases.map(record => preview.repairs.has(record.id) ? { ...record, ...preview.repairs.get(record.id) } : record);
+      void save({ ...data, cases: [...repaired, ...preview.accepted] },
+        `${preview.accepted.length} casos importados · ${preview.repairs.size} con texto reparado.`);
     });
   const form = dialog.querySelector('form');
   const input = form.elements.csv;
   const result = form.querySelector('#csv-preview');
   const submit = form.querySelector('.primary');
-  submit.textContent = 'Importar casos válidos';
+  submit.textContent = 'Aplicar importación';
   submit.disabled = true;
   let preview;
   input.addEventListener('change', async () => {
@@ -599,14 +645,14 @@ function openCsvImport() {
     if (!file) return;
     try {
       if (file.size > 5_000_000) throw new Error('El CSV supera 5 MB. Divide el archivo en varios bloques.');
-      const text = await file.text();
+      const text = decodeCsv(await file.arrayBuffer());
       if (input.files[0] !== file) return;
       preview = prepareImport(text);
-      const { accepted, duplicates, issues, historicalWithoutOffice } = preview;
-      result.innerHTML = `<p>${accepted.length} listos · ${duplicates} matrices repetidas · ${issues.length} filas para corregir</p>
+      const { accepted, duplicates, issues, historicalWithoutOffice, repairs } = preview;
+      result.innerHTML = `<p>${accepted.length} nuevos · ${repairs.size} para reparar · ${duplicates} matrices repetidas · ${issues.length} filas para corregir</p>
         ${historicalWithoutOffice ? `<p>${historicalWithoutOffice} cierres históricos carecen de número de oficio.</p>` : ''}
         ${issues.length ? `<ul class="import-errors">${issues.map(issue => `<li>${escape(issue)}</li>`).join('')}</ul>` : ''}`;
-      submit.disabled = !accepted.length;
+      submit.disabled = !accepted.length && !repairs.size;
     } catch (error) {
       result.textContent = error.message;
     }
@@ -707,7 +753,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=5');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=6');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;
