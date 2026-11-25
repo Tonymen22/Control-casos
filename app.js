@@ -31,14 +31,24 @@ const initial = {
   ],
   cases: []
 };
-let data;
-let storageError = false;
+let data = initial;
+let localData;
 try {
-  data = { ...initial, ...JSON.parse(localStorage.getItem(storageKey)) };
+  const saved = JSON.parse(localStorage.getItem(storageKey));
+  if (saved && Array.isArray(saved.cases) && Array.isArray(saved.people)) localData = { ...initial, ...saved };
 } catch {
-  storageError = true;
-  data = initial;
+  // A local backup is optional.
 }
+let client;
+let account;
+let role;
+const canManage = () => role === 'admin';
+let revision;
+let ready = false;
+let busy = false;
+let generation = 0;
+const shell = document.querySelector('aside');
+const sessionBar = document.querySelector('#session');
 const views = {
   dashboard: ['Dashboard', 'Consulta la carga de trabajo y los próximos vencimientos.'],
   cases: ['Casos', 'Registra, asigna y actualiza los casos de riesgos.'],
@@ -88,20 +98,138 @@ function notify(message) {
   clearTimeout(noticeTimer);
   noticeTimer = setTimeout(() => { notice.textContent = ''; }, 4200);
 }
-function save(next, message) {
+function showGate(title, message, controls = '') {
+  shell.hidden = true;
+  sessionBar.hidden = true;
+  main.classList.add('gated');
+  main.innerHTML = `<section class="card login-card"><div class="eyebrow">Gestión de Riesgos</div>
+    <h1>${escape(title)}</h1><p>${escape(message)}</p>${controls}</section>`;
+}
+function showLogin(message = 'Inicia sesión para acceder a Gestión de Riesgos.') {
+  showGate('Iniciar sesión', message, `<form id="login-form">
+    <label>Correo electrónico<input type="email" name="email" autocomplete="username" required></label>
+    <label>Contraseña<input type="password" name="password" autocomplete="current-password" required></label>
+    <button class="action primary">Entrar</button><p class="error" role="alert"></p></form>`);
+}
+async function loadWorkspace({ quiet = false } = {}) {
+  if (!account || busy || dialog.open) return;
+  busy = true;
+  const request = generation;
   try {
-    if (storageError) throw new Error('Storage unavailable');
-    localStorage.setItem(storageKey, JSON.stringify(next));
+    const membership = await client.from('risk_access').select('role').eq('user_id', account.id).maybeSingle();
+    if (request !== generation) return;
+    if (membership.error) throw membership.error;
+    const nextRole = membership.data?.role;
+    if (!nextRole) {
+      ready = false;
+      role = undefined;
+      data = initial;
+      showGate('Acceso pendiente', 'Pide al administrador que vincule esta cuenta.',
+        '<div class="buttons gate-actions"><button class="action" data-logout>Cerrar sesión</button><button class="action primary" data-reload>Reintentar</button></div>');
+      return;
+    }
+    const admin = nextRole === 'admin';
+    const result = admin
+      ? await client.from('risk_workspace').select('payload, revision').eq('owner_id', account.id).maybeSingle()
+      : await client.rpc('risk_my_cases');
+    if (request !== generation) return;
+    if (result.error) throw result.error;
+    if (!admin && !result.data) {
+      ready = false;
+      role = undefined;
+      data = initial;
+      showGate('Acceso pendiente', 'Pide al administrador que revise la vinculación de esta cuenta.',
+        '<div class="buttons gate-actions"><button class="action" data-logout>Cerrar sesión</button><button class="action primary" data-reload>Reintentar</button></div>');
+      return;
+    }
+    if (role !== nextRole) {
+      view = admin ? 'dashboard' : 'cases';
+      filter = '';
+      query = '';
+    }
+    role = nextRole;
+    data = (admin ? result.data?.payload : result.data) ?? initial;
+    revision = admin ? result.data?.revision ?? null : null;
+    ready = true;
+    render();
   } catch {
-    const error = dialog.querySelector('.error');
-    if (error) error.textContent = 'No se pudo guardar en este dispositivo.';
-    else notify('No se pudo guardar en este dispositivo.');
+    if (request !== generation) return;
+    if (ready) {
+      if (!quiet) notify('No se pudo actualizar. Intenta de nuevo.');
+    } else {
+      showGate('No se pudieron cargar los casos', 'Verifica la conexión y que el esquema esté instalado en Supabase.',
+        '<div class="buttons gate-actions"><button class="action" data-logout>Cerrar sesión</button><button class="action primary" data-reload>Reintentar</button></div>');
+    }
+  } finally {
+    if (request === generation) busy = false;
+  }
+}
+function activateSession(session) {
+  const user = session?.user;
+  if (user?.id === account?.id && ready) return;
+  generation++;
+  account = user;
+  role = undefined;
+  ready = false;
+  busy = false;
+  data = initial;
+  revision = null;
+  view = 'dashboard';
+  query = '';
+  filter = '';
+  if (dialog.open) dialog.close();
+  document.querySelector('#notice').textContent = '';
+  if (!account) {
+    showLogin();
     return;
   }
-  data = next;
-  if (dialog.open) dialog.close();
-  render();
-  notify(message);
+  showGate('Cargando casos', 'Conectando con Supabase…');
+  void loadWorkspace();
+}
+function showSaveError(message) {
+  const error = dialog.open && dialog.querySelector('.error');
+  if (error) error.textContent = message;
+  else notify(message);
+}
+async function save(next, message) {
+  if (!ready || !account || !canManage() || busy) {
+    showSaveError('Hay una operación en curso. Intenta de nuevo.');
+    return;
+  }
+  busy = true;
+  const request = generation;
+  const version = revision;
+  const owner = account.id;
+  let conflict = false;
+  try {
+    const table = client.from('risk_workspace');
+    const write = version === null
+      ? table.insert({ owner_id: owner, payload: next })
+      : table.update({ payload: next, revision: version + 1 }).eq('owner_id', owner).eq('revision', version);
+    const { data: row, error } = await write.select('revision').maybeSingle();
+    if (request !== generation) return;
+    if (error && error.code !== '23505') throw error;
+    if (!row) {
+      conflict = true;
+      if (dialog.open) dialog.close();
+      return;
+    }
+    revision = row.revision;
+    data = next;
+    if (dialog.open) dialog.close();
+    render();
+    notify(message);
+  } catch {
+    if (request === generation) showSaveError('No se pudo guardar en Supabase. Revisa tu conexión e intenta de nuevo.');
+  } finally {
+    if (request === generation) {
+      busy = false;
+      if (conflict) {
+        await loadWorkspace();
+        notify('Los datos cambiaron en otro dispositivo. Revisa la versión actual antes de volver a editar.');
+      }
+    }
+  }
 }
 function caseRows(records, empty) {
   if (!records.length) return '<p class="empty">' + escape(empty) + '</p>';
@@ -174,17 +302,47 @@ function people() {
         <button class="action" data-catalog="${group}" data-entry="${escape(entry.id)}" aria-label="Editar ${escape(entry.name)}">Editar</button></article>`).join('')}</section>`).join('')}</div>`;
 }
 function render() {
+  if (!ready) return;
+  shell.hidden = false;
+  sessionBar.hidden = false;
+  main.classList.remove('gated');
+  sessionBar.querySelector('span').textContent = account.email ?? '';
+  shell.classList.toggle('analyst-nav', !canManage());
+  const importButton = canManage() && localData && revision === null
+    ? '<div class="card import-card"><p>Hay datos de una versión anterior en este dispositivo.</p><button class="action" data-import>Importar a esta cuenta</button></div>'
+    : '';
   document.querySelectorAll('nav button').forEach(button => {
+    button.hidden = !canManage() && !['cases', 'calendar'].includes(button.dataset.view);
     if (button.dataset.view === view) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
   });
-  const [title, description] = views[view];
-  const action = view === 'people' ? '' :
+  const [title, description] = !canManage() && view === 'cases'
+    ? ['Mis casos', 'Consulta tus asignaciones y fechas de plazo.'] : views[view];
+  const action = !canManage() || view === 'people' ? '' :
     '<button class="action primary" data-edit-case="">+ Nuevo caso</button>';
   main.innerHTML = `<header><div><div class="eyebrow">Gestión de Riesgos</div><h1>${title}</h1><p>${description}</p></div>${action}</header>
-    ${storageError ? '<p class="error">No se pudo abrir el almacenamiento local.</p>' : ''}
+    ${importButton}
     ${({ dashboard, cases, calendar, people })[view]()}`;
   if (view === 'cases') filteredCases();
+}
+function showCase(id) {
+  const record = data.cases.find(item => item.id === id);
+  if (!record) return;
+  const fields = [
+    ['Número de oficio', record.office], ['Número de caso', record.number],
+    ['Tipo de caso', typeOf(record)?.name], ['Dependencia solicitante', entryOf('departments', record.department)?.name],
+    ['Analista de riesgos', nameOf(record.person)],
+    ['Responsable de investigación', entryOf('researchers', record.researcher)?.name],
+    ['Oficio de la matriz enviada', record.origin],
+    ['Fecha de asignación', formatDate(record.assigned)], ['Fecha de plazo', formatDate(record.due)],
+    ['Estado', status(record)[0]]
+  ];
+  dialog.innerHTML = `<div class="row"><h2 id="dialog-title">${escape(record.topic)}</h2>
+    <button type="button" class="action" data-cancel aria-label="Cerrar">×</button></div>
+    <dl class="case-detail">${fields.filter(([, value]) => value).map(([label, value]) =>
+      `<dt>${label}</dt><dd>${escape(value)}</dd>`).join('')}</dl>`;
+  dialog.setAttribute('aria-labelledby', 'dialog-title');
+  if (!dialog.open) dialog.showModal();
 }
 function openForm(title, fields, submit, deleteAttrs = '') {
   dialog.innerHTML = `<div class="row"><h2 id="dialog-title">${title}</h2><button type="button" class="action" data-cancel aria-label="Cerrar">×</button></div>
@@ -282,11 +440,23 @@ document.addEventListener('click', event => {
   const button = event.target.closest('button');
   if (!button) return;
   const { dataset } = button;
-  if ('view' in dataset) { view = dataset.view; render(); window.scrollTo(0, 0); }
-  if ('editCase' in dataset) caseEditor(dataset.editCase);
-  if ('catalog' in dataset) catalogEditor(dataset.catalog, dataset.entry);
+  if ('reload' in dataset) void loadWorkspace();
+  if ('logout' in dataset) {
+    client.auth.signOut({ scope: 'local' }).then(({error}) => {
+      if (error) notify('No se pudo cerrar la sesión. Intenta de nuevo.');
+      else if (account) activateSession(null);
+    });
+  }
+  if ('import' in dataset && ready && canManage() && localData && revision === null &&
+      confirm('¿Importar los casos y catálogos de este dispositivo a tu cuenta actual?')) {
+    void save(localData, 'Datos importados a Supabase.');
+  }
+  if (!ready) return;
+  if ('view' in dataset && (canManage() || ['cases','calendar'].includes(dataset.view))) { view = dataset.view; render(); window.scrollTo(0, 0); }
+  if ('editCase' in dataset) (canManage() ? caseEditor : showCase)(dataset.editCase);
+  if (canManage() && 'catalog' in dataset) catalogEditor(dataset.catalog, dataset.entry);
   if ('cancel' in dataset) dialog.close();
-  if ('deleteCase' in dataset && confirm('¿Eliminar este caso permanentemente?')) {
+  if (canManage() && 'deleteCase' in dataset && confirm('¿Eliminar este caso permanentemente?')) {
     save({ ...data, cases: data.cases.filter(record => record.id !== dataset.deleteCase) }, 'Caso eliminado.');
   }
   if ('day' in dataset) {
@@ -309,12 +479,53 @@ main.addEventListener('input', event => {
 main.addEventListener('change', event => {
   if (event.target.id === 'filter') { filter = event.target.value; filteredCases(); }
 });
-window.addEventListener('storage', event => {
-  if (event.key === storageKey && event.newValue) {
-    data = { ...initial, ...JSON.parse(event.newValue) };
-    if (dialog.open) dialog.close();
-    render();
+document.addEventListener('submit', async event => {
+  if (event.target.id !== 'login-form') return;
+  event.preventDefault();
+  const form = event.target;
+  const button = form.querySelector('button');
+  const errorText = form.querySelector('.error');
+  const { email, password } = Object.fromEntries(new FormData(form));
+  button.disabled = true;
+  errorText.textContent = '';
+  try {
+    const { data: auth, error } = await client.auth.signInWithPassword({ email: email.trim(), password });
+    if (error) {
+      errorText.textContent = error.status >= 500 || !error.status
+        ? 'No se pudo conectar. Intenta de nuevo.'
+        : 'No se pudo iniciar sesión. Revisa tu correo y contraseña.';
+    } else if (auth.session?.user?.id !== account?.id) {
+      activateSession(auth.session);
+    }
+  } catch {
+    errorText.textContent = 'No se pudo conectar. Intenta de nuevo.';
+  } finally {
+    button.disabled = false;
   }
 });
-render();
+document.addEventListener('visibilitychange', () => {
+  if (ready && !document.hidden) void loadWorkspace({ quiet: true });
+});
+async function start() {
+  showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
+  try {
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=4');
+    if (!projectUrl || !publishableKey) {
+      showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
+      return;
+    }
+    const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.89.0/+esm');
+    client = createClient(projectUrl, publishableKey);
+    client.auth.onAuthStateChange((event, session) => {
+      if (['INITIAL_SESSION', 'SIGNED_IN', 'SIGNED_OUT'].includes(event)) {
+        setTimeout(() => {
+          if (!session || session.user.id !== account?.id) activateSession(session);
+        }, 0);
+      }
+    });
+  } catch {
+    showGate('Conexión no disponible', 'Revisa la configuración de Supabase y vuelve a cargar la página.');
+  }
+}
+void start();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});

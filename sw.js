@@ -1,5 +1,5 @@
-const cacheName = 'gestion-riesgos-shell-v2';
-const assets = ['./index.html', './style.css?v=2', './app.js?v=2', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
+const cacheName = 'gestion-riesgos-shell-v4';
+const assets = ['./index.html', './style.css?v=4', './app.js?v=4', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(assets)));
 });
@@ -10,6 +10,7 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const { request } = event;
   if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) return;
+  if (new URL(request.url).pathname.endsWith('/supabase-config.js')) return;
   if (request.mode === 'navigate') {
     event.respondWith(fetch(request).catch(() => caches.match('./index.html', { cacheName })));
     return;
