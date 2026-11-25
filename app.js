@@ -63,6 +63,7 @@ let month = selected.slice(0, 7);
 let query = '';
 let filter = '';
 let drillFilter = null;
+let caseTab = '';
 let noticeTimer;
 const dateFormat = new Intl.DateTimeFormat('es-GT', { dateStyle: 'medium', timeZone: 'UTC' });
 const monthFormat = new Intl.DateTimeFormat('es-GT', { month: 'long', year: 'numeric', timeZone: 'UTC' });
@@ -73,6 +74,36 @@ const formatDate = value => value ? dateFormat.format(new Date(value + 'T00:00:0
 const entryOf = (group, id) => data[group].find(entry => entry.id === id);
 const nameOf = id => entryOf('people', id)?.name ?? 'Sin analista';
 const typeOf = record => entryOf('types', record.type ?? 'matrix');
+const caseMode = record => typeOf(record)?.mode ?? 'matrix';
+const caseCategories = {
+  matrix: 'Matrices',
+  research: 'Investigaciones con matriz',
+  followup: 'Seguimientos'
+};
+function correlate(value) {
+  const match = /^(MRT|SEG)-(\d{1,9})-(\d{4})$/i.exec((value ?? '').trim());
+  if (!match || Number(match[2]) < 1) return null;
+  const prefix = match[1].toUpperCase();
+  const sequence = Number(match[2]);
+  return {prefix, sequence, year: match[3], key: prefix + '-' + match[3]};
+}
+function sequenceMarks(...snapshots) {
+  const marks = {};
+  for (const snapshot of snapshots) {
+    for (const [key, value] of Object.entries(snapshot.sequenceMarks ?? {})) {
+      if (/^(MRT|SEG)-\d{4}$/.test(key) && Number.isSafeInteger(value)) marks[key] = Math.max(marks[key] ?? 0,value);
+    }
+    for (const record of snapshot.cases) {
+      for (const value of [record.matrix,record.followupNumber]) {
+        const parsed = correlate(value);
+        if (parsed) marks[parsed.key] = Math.max(marks[parsed.key] ?? 0,parsed.sequence);
+      }
+    }
+  }
+  return marks;
+}
+const formatSequence = (prefix, sequence, year) => `${prefix}-${String(sequence).padStart(2,'0')}-${year}`;
+const caseIdentifier = record => caseMode(record) === 'followup' ? record.followupNumber : record.matrix;
 const compareNames = new Intl.Collator('es-GT', {sensitivity:'base', numeric:true}).compare;
 const sortedCatalog = group => [...data[group]].sort((a,b) => compareNames(a.name,b.name));
 const catalogOptions = (group, selected) => sortedCatalog(group)
@@ -156,6 +187,7 @@ async function loadWorkspace({ quiet = false } = {}) {
       view = admin ? 'dashboard' : 'cases';
       filter = '';
       drillFilter = null;
+      caseTab = '';
       query = '';
     }
     role = nextRole;
@@ -193,6 +225,7 @@ function activateSession(session) {
   query = '';
   filter = '';
   drillFilter = null;
+  caseTab = '';
   if (dialog.open) dialog.close();
   document.querySelector('#notice').textContent = '';
   if (!account) {
@@ -216,6 +249,7 @@ async function save(next, message) {
   const request = generation;
   const version = revision;
   const owner = account.id;
+  next = { ...next, sequenceMarks: sequenceMarks(data,next) };
   let conflict = false;
   try {
     const table = client.from('risk_workspace');
@@ -251,24 +285,31 @@ function caseRows(records, empty) {
   if (!records.length) return '<p class="empty">' + escape(empty) + '</p>';
   return records.map(record => {
     const [label, tone] = status(record);
+    const mode = caseMode(record);
+    const identifier = caseIdentifier(record);
     const deadlineTone = !record.due ? 'neutral' : !record.closed && tone === 'late' ? 'late'
       : !record.closed && tone === 'soon' ? 'soon' : 'dated';
     const badge = (caption, value, color) => `<span class="case-badge badge-${color}">
       <span>${caption}</span><b>${escape(value)}</b></span>`;
-    return `<article class="case case-card"><button type="button" class="case-card-open" data-edit-case="${escape(record.id)}">
+    return `<article class="case case-card case-kind-${mode}"><button type="button" class="case-card-open" data-edit-case="${escape(record.id)}">
       <span class="case-card-heading">
-        <strong class="case-title">${escape(record.topic)}</strong><span class="pill ${tone}">${label}</span>
+        <span class="case-identity"><strong class="case-code">${escape(identifier || 'Sin correlativo')}</strong>
+          <span class="case-type">${escape(typeOf(record)?.name ?? 'Matriz de Riesgos')}</span></span>
+        <span class="pill ${tone}">${label}</span>
       </span>
-      <span class="case-references">Caso ${escape(record.number || 'sin número')}${record.matrix ? ' · ' + escape(record.matrix) : ''}${record.office ? ' · Oficio ' + escape(record.office) : ''}</span>
+      <strong class="case-title">${escape(record.topic)}</strong>
       <span class="case-badges">
         ${badge('Analista', nameOf(record.person), 'person')}
         ${badge('Dependencia', entryOf('departments', record.department)?.name ?? 'Sin asignar', 'department')}
         ${badge('Plazo', formatDate(record.due), deadlineTone)}
         ${record.closedAt ? badge('Cierre', formatDate(record.closedAt), 'closed') : ''}
       </span>
-      <span class="case-extra">${escape(typeOf(record)?.name)}
-        ${record.researcher ? ' · Investigación: ' + escape(entryOf('researchers', record.researcher)?.name) : ''}
-        ${record.origin ? ' · Oficio de la matriz enviada: ' + escape(record.origin) : ''}
+      <span class="case-badges case-document-badges">
+        ${record.number ? badge('Caso', record.number, 'neutral') : ''}
+        ${record.office ? badge('Oficio', record.office, 'neutral') : ''}
+        ${mode === 'followup' && record.matrix ? badge('Matriz de origen', record.matrix, 'neutral') : ''}
+        ${record.researcher ? badge('Investigación', entryOf('researchers', record.researcher)?.name ?? 'Sin asignar', 'department') : ''}
+        ${record.origin ? badge('Oficio de la matriz enviada', record.origin, 'neutral') : ''}
       </span></button></article>`;
 
   }).join('');
@@ -358,15 +399,18 @@ function dashboard() {
     <section class="card"><h2 class="section-title">${canManage() ? 'Plazos pendientes' : 'Mis próximos plazos'}</h2>${caseRows(remaining.sort(sortDue).slice(0, 8), 'Aquí aparecerán los plazos de los casos abiertos.')}</section>`;
 }
 function filteredCases() {
-  const matches = data.cases.filter(record => (!filter || record.person === filter) &&
+  const matches = data.cases.filter(record => (!filter || record.person === filter) && (!caseTab || caseMode(record) === caseTab) &&
     (!drillFilter || caseGroupLabel(drillFilter.kind, record) === drillFilter.label) &&
-    normalize([record.topic, record.number, record.matrix, record.office, record.responseOffice, nameOf(record.person), typeOf(record)?.name, entryOf('departments', record.department)?.name].join(' ')).includes(normalize(query.trim())));
+    normalize([record.topic, record.number, record.matrix, record.followupNumber, record.office, record.responseOffice, nameOf(record.person), typeOf(record)?.name, entryOf('departments', record.department)?.name].join(' ')).includes(normalize(query.trim())));
   main.querySelector('#case-results').innerHTML = caseRows(matches.sort(sortDue), 'No hay casos que coincidan.');
 }
 function cases() {
-  return `<section class="card">${drillFilter ? `<div class="toolbar active-filter">
+  const tabs = [['','Todos'], ...Object.entries(caseCategories)];
+  return `<section class="card"><div class="case-tabs" role="group" aria-label="Tipo de caso">
+    ${tabs.map(([mode,label]) => `<button type="button" class="case-tab case-kind-${mode || 'all'}" data-case-tab="${mode}"
+      aria-pressed="${mode === caseTab}">${label}</button>`).join('')}</div>${drillFilter ? `<div class="toolbar active-filter">
     <span><strong>${drillFilter.kind === 'people' ? 'Analista' : 'Dependencia solicitante'}</strong> · ${escape(drillFilter.label)}</span>
-    <button class="action" data-clear-drill>Limpiar filtro</button></div>` : ''}<div class="toolbar"><input id="search" type="search" aria-label="Buscar casos" placeholder="Buscar por caso, oficio o tema" value="${escape(query)}">
+    <button class="action" data-clear-drill>Limpiar filtro</button></div>` : ''}<div class="toolbar"><input id="search" type="search" aria-label="Buscar casos" placeholder="Buscar por correlativo, caso, oficio o tema" value="${escape(query)}">
     <select id="filter" aria-label="Filtrar por analista"><option value="">Todos los analistas</option>${sortedCatalog('people').map(person =>
     `<option value="${escape(person.id)}" ${filter === person.id ? 'selected' : ''}>${escape(person.name)}</option>`).join('')}</select></div><div id="case-results"></div></section>`;
 }
@@ -560,6 +604,9 @@ function caseEditor(id, source = null, message = '') {
     ${analyst ? '<p class="edit-scope">Puedes editar el tema, la dependencia solicitante y las observaciones.</p>' : ''}
     <div class="fields">${field('office', 'Oficio de ingreso', 100, !record.historical && !record.sourceMatrixId)}${field('number', 'Número de caso', 100, !record.historical && !record.sourceMatrixId)}</div>
     ${field('matrix', 'Número de matriz', 100, false)}
+    <label id="followup-number-field" hidden>Correlativo de seguimiento
+      <input name="followupNumber" maxlength="100" value="${escape(record.followupNumber)}" placeholder="Automático al guardar">
+    </label>
     ${field('topic', 'Tema', 300)}
     <label>Tipo de caso<select name="type" required ${record.sourceMatrixId ? 'disabled' : ''}><option value="">Seleccionar tipo</option>${catalogOptions('types', currentType)}</select></label>
     <label>Dependencia solicitante<select name="department" ${(record.historical || record.sourceMatrixId) ? '' : 'required'}><option value="">Seleccionar dependencia</option>${catalogOptions('departments', record.department)}</select></label>
@@ -589,7 +636,30 @@ function caseEditor(id, source = null, message = '') {
         (existing?.origin === rawOrigin && typeOf(existing)?.mode === 'followup' ? rawOrigin : '') : '';
       const [office, number, topic] = ['office','number','topic'].map(key => values[key].trim());
       const error = form.querySelector('.error');
-      const matrix = values.matrix.trim();
+      let matrix = values.matrix.trim();
+      let followupNumber = values.followupNumber?.trim() ?? '';
+      const prefix = mode === 'followup' ? 'SEG' : 'MRT';
+      const year = assigned.slice(0,4);
+      const value = prefix === 'SEG' ? followupNumber : matrix;
+      const previous = prefix === 'SEG' ? existing?.followupNumber : caseMode(existing ?? {}) === 'followup' ? '' : existing?.matrix;
+      let identifier = value;
+      if (value !== previous || !value) {
+        const entered = correlate(value);
+        if (value && (!entered || entered.prefix !== prefix)) {
+          error.textContent = 'Usa el formato ' + prefix + '-01-' + year + ' o deja el campo vacío para asignarlo automáticamente.'; return;
+        }
+        const amount = entered?.sequence ?? ((sequenceMarks(data)[prefix + '-' + year] ?? 0) + 1);
+        if (amount > 999999999) { error.textContent = 'La serie de correlativos alcanzó su límite.'; return; }
+        identifier = formatSequence(prefix, amount, entered?.year ?? year);
+        const parsed = correlate(identifier);
+        if (data.cases.some(item => {
+          if (item.id === id) return false;
+          const other = correlate(caseIdentifier(item));
+          return other?.key === parsed.key && other.sequence === parsed.sequence;
+        })) { error.textContent = 'Ya existe un caso con ese correlativo.'; return; }
+      }
+      if (mode === 'followup') followupNumber = identifier;
+      else { matrix = identifier; followupNumber = ''; }
       const closed = state === 'closed';
       const closedAt = closed ? values.closedAt : '';
       const responseOffice = closed ? values.responseOffice.trim() : '';
@@ -606,7 +676,7 @@ function caseEditor(id, source = null, message = '') {
       if (mode === 'followup' && !origin) { error.textContent = 'Indica el oficio de respuesta de la matriz con el formato ST/DIPT/DRIGCT No. 123.'; return; }
       if (due && due < assigned) { error.textContent = 'El plazo debe ser igual o posterior a la asignación.'; return; }
       if (matrix && data.cases.some(item => item.id !== id && normalize(item.matrix ?? '') === normalize(matrix) &&
-          mode !== 'followup' && typeOf(item)?.mode !== 'followup')) {
+          mode !== 'followup' && caseMode(item) !== 'followup')) {
         error.textContent = 'Ya existe un registro con ese número de matriz.'; return;
       }
       if (!record.historical && !record.sourceMatrixId && number && data.cases.some(item => item.id !== id && normalize(item.number ?? '') === normalize(number) &&
@@ -616,13 +686,20 @@ function caseEditor(id, source = null, message = '') {
       if (source && existingFollowup(source)) {
         error.textContent = 'Esta matriz ya tiene un seguimiento.'; return;
       }
-      const item = { ...record, id: id || crypto.randomUUID(), office, number, matrix, topic, person, assigned, due,
+      const item = { ...record, id: id || crypto.randomUUID(), office, number, matrix, followupNumber, topic, person, assigned, due,
         type, department, researcher, origin, closed, closedAt, responseOffice, notes: values.notes.trim() };
       save({ ...data, cases: existing ? data.cases.map(entry => entry.id === id ? item : entry) : [...data.cases, item] }, 'Caso guardado.');
     }, existing && !analyst ? `${followupButton}<button type="button" class="action danger" data-delete-case="${escape(id)}">Eliminar</button>` : '');
   const typeSelect = dialog.querySelector('[name="type"]');
   const updateFields = () => {
     const mode = entryOf('types', typeSelect.value)?.mode;
+    const matrixInput = dialog.querySelector('[name="matrix"]');
+    matrixInput.placeholder = mode === 'followup' ? 'Matriz de origen' : 'Automático al guardar';
+    matrixInput.readOnly = mode === 'followup' && Boolean(record.sourceMatrixId);
+    matrixInput.parentElement.firstChild.textContent = mode === 'followup' ? 'Número de matriz de origen' : 'Número de matriz';
+    const followupField = dialog.querySelector('#followup-number-field');
+    followupField.hidden = mode !== 'followup';
+    followupField.querySelector('input').disabled = mode !== 'followup';
     for (const [selector, name, condition] of [
       ['#research-field', 'researcher', mode === 'research'],
       ['#followup-field', 'origin', mode === 'followup']
@@ -866,6 +943,7 @@ document.addEventListener('click', event => {
   if (!ready) return;
   if ('drillKind' in dataset && view === 'dashboard' && ['people','departments'].includes(dataset.drillKind)) {
     drillFilter = {kind:dataset.drillKind, label:dataset.drillLabel};
+    caseTab = '';
     filter = '';
     query = '';
     view = 'cases';
@@ -873,8 +951,14 @@ document.addEventListener('click', event => {
     window.scrollTo(0, 0);
     main.querySelector('h1')?.focus({preventScroll:true});
   }
+  if ('caseTab' in dataset && view === 'cases' && (dataset.caseTab === '' || Object.hasOwn(caseCategories,dataset.caseTab))) {
+    caseTab = dataset.caseTab;
+    main.querySelectorAll('[data-case-tab]').forEach(tab => tab.setAttribute('aria-pressed', String(tab.dataset.caseTab === caseTab)));
+    filteredCases();
+  }
   if ('clearDrill' in dataset && view === 'cases') {
     drillFilter = null;
+    caseTab = '';
     filter = '';
     query = '';
     render();
@@ -939,7 +1023,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=12');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=13');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;
