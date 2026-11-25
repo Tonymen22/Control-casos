@@ -75,3 +75,15 @@ main>header .primary{background:#4774eb;border-color:#7699fa}
 dialog input:disabled,dialog select:disabled,dialog textarea:disabled{background:#edf1f7;color:#53647e;opacity:1;cursor:default}
 dialog form label:has(input:disabled),dialog form label:has(select:disabled){color:#52647e}
 @media(max-width:800px){aside.analyst-nav nav{grid-template-columns:repeat(3,1fr)}}
+
+.chart-legend{display:flex;gap:14px;margin:14px 0;color:#435775;font-size:.85rem}
+.chart-legend span{display:flex;align-items:center;gap:6px}
+.chart-legend span::before{content:"";width:10px;height:10px;border-radius:3px;background:#416ee2}
+.chart-legend span:last-child::before{background:#16856d}
+.dashboard-chart{display:grid;gap:12px;margin-bottom:16px}
+.chart-caption{display:flex;gap:10px;align-items:start;justify-content:space-between;font-size:.88rem;margin-bottom:5px;overflow-wrap:anywhere}
+.chart-track{display:flex;height:10px;background:#e7edf7;border-radius:8px;overflow:hidden}
+.chart-track span{background:#416ee2}
+.chart-track span:last-child{background:#16856d}
+.chart-note{font-size:.85rem;margin-bottom:10px}
+.dashboard-table td:nth-child(2){color:#233f75;background:#d8e6fc55}

@@ -71,7 +71,9 @@ const formatDate = value => value ? dateFormat.format(new Date(value + 'T00:00:0
 const entryOf = (group, id) => data[group].find(entry => entry.id === id);
 const nameOf = id => entryOf('people', id)?.name ?? 'Sin analista';
 const typeOf = record => entryOf('types', record.type ?? 'matrix');
-const catalogOptions = (group, selected) => data[group]
+const compareNames = new Intl.Collator('es-GT', {sensitivity:'base', numeric:true}).compare;
+const sortedCatalog = group => [...data[group]].sort((a,b) => compareNames(a.name,b.name));
+const catalogOptions = (group, selected) => sortedCatalog(group)
   .filter(entry => entry.active || entry.id === selected)
   .map(entry => `<option value="${escape(entry.id)}" ${entry.id === selected ? 'selected' : ''}>${escape(entry.name)}${entry.active ? '' : ' (inactivo)'}</option>`).join('');
 const normalize = value => value.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
@@ -292,11 +294,23 @@ function dashboard() {
         groups.set(label, values);
       }
     }
-    return `<section class="card dashboard-table"><h2>${title}</h2>${groups.size ? `<div class="table-scroll"><table>
-      <thead><tr><th>${column}</th><th>Abiertos</th><th>Cerrados</th><th>Vencidos</th></tr></thead><tbody>
-      ${[...groups].sort(([a],[b]) => a.localeCompare(b,'es')).map(([label, values]) =>
-        `<tr><th scope="row">${escape(label)}</th>${values.map(value => `<td>${value}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` :
+    const totalOf = ([opened, closed]) => Number(opened) + Number(closed);
+    const rows = [...groups].sort(([a, av], [b, bv]) => totalOf(bv) - totalOf(av) || compareNames(a,b));
+    const maximum = rows.length ? Math.max(1, totalOf(rows[0][1])) : 1;
+    return `<section class="card dashboard-table"><h2>${title}</h2>${rows.length ? `
+      <div class="chart-legend" aria-hidden="true"><span>Abiertos</span><span>Cerrados</span></div>
+      <div class="dashboard-chart" aria-hidden="true">${rows.slice(0,6).map(([label, values]) => {
+        const [opened, closed] = values;
+        return `<div class="chart-row"><div class="chart-caption"><span>${escape(label)}</span><strong>${totalOf(values)}</strong></div>
+          <div class="chart-track"><span style="width:${100 * opened / maximum}%"></span><span style="width:${100 * closed / maximum}%"></span></div></div>`;
+      }).join('')}</div>
+      ${rows.length > 6 ? '<p class="chart-note">Gráfica de los seis grupos con más casos.</p>' : ''}
+      <div class="table-scroll"><table aria-label="${title}, de mayor a menor por total">
+      <thead><tr><th>${column}</th><th aria-sort="descending">Total</th><th>Abiertos</th><th>Cerrados</th><th>Vencidos</th></tr></thead><tbody>
+      ${rows.map(([label, values]) =>
+        `<tr><th scope="row">${escape(label)}</th><td><strong>${totalOf(values)}</strong></td>${values.map(value => `<td>${value}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` :
       '<p class="empty">Sin casos registrados.</p>'}</section>`;
+
   };
   return `<div class="stats">${counts.map(([label, count], index) => `<div class="card stat stat-${index}"><span>${label}</span><strong>${count}</strong></div>`).join('')}</div>
     <div class="dashboard-grid">
@@ -313,7 +327,7 @@ function filteredCases() {
 }
 function cases() {
   return `<section class="card"><div class="toolbar"><input id="search" type="search" aria-label="Buscar casos" placeholder="Buscar por caso, oficio o tema" value="${escape(query)}">
-    <select id="filter" aria-label="Filtrar por analista"><option value="">Todos los analistas</option>${data.people.map(person =>
+    <select id="filter" aria-label="Filtrar por analista"><option value="">Todos los analistas</option>${sortedCatalog('people').map(person =>
     `<option value="${escape(person.id)}" ${filter === person.id ? 'selected' : ''}>${escape(person.name)}</option>`).join('')}</select></div><div id="case-results"></div></section>`;
 }
 function calendar() {
@@ -361,7 +375,7 @@ function people() {
   return `<div class="catalog-grid">${Object.entries(catalogLabels).map(([group, label]) =>
     `<section class="card"><div class="row section-title"><h2>${label}</h2>
       <button class="action" data-catalog="${group}" data-entry="">Añadir</button></div>
-      ${data[group].map(entry => `<article class="person row"><div><strong>${escape(entry.name)}</strong>
+      ${sortedCatalog(group).map(entry => `<article class="person row"><div><strong>${escape(entry.name)}</strong>
         <small>${entry.active ? 'Activo' : 'Inactivo'}${entry.mode ? ' · ' + typeDetails[entry.mode] : ''}</small></div>
         <button class="action" data-catalog="${group}" data-entry="${escape(entry.id)}" aria-label="Editar ${escape(entry.name)}">Editar</button></article>`).join('')}</section>`).join('')}</div>`;
 }
@@ -450,7 +464,7 @@ function caseEditor(id) {
   if (analyst && !existing) return;
   const record = existing ?? { assigned: today() };
   const currentType = existing ? record.type ?? 'matrix' : '';
-  const options = data.people.filter(person => person.active || person.id === record.person);
+  const options = sortedCatalog('people').filter(person => person.active || person.id === record.person);
   if (!analyst && !options.length) {
     notify('Activa o añade un analista antes de asignar un caso.');
     return;
@@ -568,7 +582,7 @@ function decodeCsv(bytes) {
     if (encoding !== 'utf-8') throw error;
     text = new TextDecoder('windows-1252').decode(bytes);
   }
-  if (text.includes(' ')) throw new Error('El archivo ya contiene caracteres dañados ( ). Exporta otra vez desde el Excel original como CSV UTF-8.');
+  if (text.includes('�')) throw new Error('El archivo ya contiene caracteres dañados (�). Exporta otra vez desde el Excel original como CSV UTF-8.');
   return text;
 }
 function csvRows(text) {
@@ -648,8 +662,8 @@ function prepareImport(text) {
         const original = get(field);
         const characters = [...previous];
         const candidates = [...original];
-        if (previous.includes(' ') && characters.length === candidates.length &&
-            characters.every((character, index) => character === ' ' || character === candidates[index])) {
+        if (previous.includes('�') && characters.length === candidates.length &&
+            characters.every((character, index) => character === '�' || character === candidates[index])) {
           changes[field] = original;
         }
       }
@@ -815,7 +829,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=8');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=9');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;
