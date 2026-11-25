@@ -349,6 +349,12 @@ function dashboard() {
     ${breakdown('Casos por tipo', 'Tipo', 'types', record => typeOf(record)?.name ?? 'Sin tipo')}
     ${breakdown('Casos por dependencia', 'Dependencia', 'departments', record => caseGroupLabel('departments', record))}
     </div>
+    ${canManage() ? `<section class="card followup-reminders"><h2 class="section-title">Seguimientos por iniciar</h2>
+      ${data.cases.map(record => ({record, date: followupDate(record)})).filter(item => item.date)
+        .sort((a,b) => a.date.localeCompare(b.date)).slice(0,8).map(({record,date}) =>
+          `<button class="event event-reminder" data-start-followup="${escape(record.id)}">
+          <strong>${escape(record.topic)}</strong><span>${date < todayDate ? 'Pendiente desde' : 'Programado para'} ${formatDate(date)} · ${escape(nameOf(record.person))}</span></button>`).join('')
+        || '<p class="empty">Sin seguimientos pendientes.</p>'}</section>` : ''}
     <section class="card"><h2 class="section-title">${canManage() ? 'Plazos pendientes' : 'Mis próximos plazos'}</h2>${caseRows(remaining.sort(sortDue).slice(0, 8), 'Aquí aparecerán los plazos de los casos abiertos.')}</section>`;
 }
 function filteredCases() {
@@ -364,24 +370,44 @@ function cases() {
     <select id="filter" aria-label="Filtrar por analista"><option value="">Todos los analistas</option>${sortedCatalog('people').map(person =>
     `<option value="${escape(person.id)}" ${filter === person.id ? 'selected' : ''}>${escape(person.name)}</option>`).join('')}</select></div><div id="case-results"></div></section>`;
 }
+function matrixResponse(value) {
+  const match = /^ST\s*\/\s*DIPT\s*\/\s*DRIGCT\s+No\.?\s*(\d+)$/i.exec((value ?? '').trim());
+  return match ? `ST/DIPT/DRIGCT No. ${match[1]}` : '';
+}
+const isFinalizedMatrix = record => record.closed && ['matrix','research'].includes(typeOf(record)?.mode ?? 'matrix');
+function existingFollowup(source) {
+  const office = matrixResponse(source.responseOffice);
+  return data.cases.find(item => typeOf(item)?.mode === 'followup' &&
+    (item.sourceMatrixId === source.id || (!item.sourceMatrixId && office && matrixResponse(item.origin) === office &&
+      ((source.matrix && item.matrix === source.matrix) || (source.number && item.number === source.number &&
+        (!source.matrix || !item.matrix))))));
+}
+function followupDate(record) {
+  if (!canManage() || !record.closedAt || !isFinalizedMatrix(record) || existingFollowup(record)) return '';
+  const [year, month, day] = record.closedAt.split('-').map(Number);
+  const last = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month, Math.min(day, last))).toISOString().slice(0,10);
+}
 function calendar() {
   const first = new Date(month + '-01T00:00:00Z');
   const leading = (first.getUTCDay() + 6) % 7;
   const count = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).getUTCDate();
   const byDate = new Map();
   for (const record of data.cases) {
-    for (const [date, label] of [[record.due, 'Plazo'], [record.closed && record.closedAt, 'Cierre']]) {
+    for (const [date, label] of [[record.due, 'Plazo'], [record.closed && record.closedAt, 'Cierre'], [followupDate(record), 'Iniciar seguimiento']]) {
       if (!date || date.slice(0, 7) !== month) continue;
       if (!byDate.has(date)) byDate.set(date, []);
       byDate.get(date).push({record, label});
     }
   }
-  for (const events of byDate.values()) events.sort((a,b) => a.label === b.label ? sortDue(a.record,b.record) : a.label === 'Plazo' ? -1 : 1);
+  for (const events of byDate.values()) events.sort((a,b) => a.label === b.label ? sortDue(a.record,b.record) : ['Plazo','Cierre','Iniciar seguimiento'].indexOf(a.label) - ['Plazo','Cierre','Iniciar seguimiento'].indexOf(b.label));
   const entries = ({record, label}) => {
     const mode = typeOf(record)?.mode ?? 'matrix';
-    const office = label === 'Cierre' ? record.responseOffice : record.office;
+    const office = label === 'Plazo' ? record.office : record.responseOffice;
     const reference = office || record.matrix || record.number || 'Sin oficio';
-    return `<button class="event event-${mode} ${label === 'Cierre' ? 'closure-event' : ''}" data-edit-case="${escape(record.id)}">
+    const reminder = label === 'Iniciar seguimiento';
+    const action = reminder ? 'data-start-followup' : 'data-edit-case';
+    return `<button class="event event-${reminder ? 'reminder' : mode} ${label === 'Cierre' ? 'closure-event' : ''}" ${action}="${escape(record.id)}">
       <strong>${label} · ${escape(reference)}</strong><span>${escape(nameOf(record.person))}</span>
       <small>${escape(typeOf(record)?.name)}</small></button>`;
   };
@@ -396,14 +422,14 @@ function calendar() {
     <button class="action" data-month="-1" aria-label="Mes anterior">‹</button><button class="action" data-today>Hoy</button>
     <button class="action" data-month="1" aria-label="Mes siguiente">›</button></div></div>
     <div class="legend">${Object.entries(typeDetails).map(([mode, label]) =>
-    `<span class="event-${mode}">${label}</span>`).join('')}</div>
+    `<span class="event-${mode}">${label}</span>`).join('')}${canManage() ? '<span class="event-reminder">Inicio de seguimiento</span>' : ''}</div>
     <div class="calendar">${['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'].map(day => `<span class="weekday">${day}</span>`).join('')}
     ${'<span></span>'.repeat(leading)}${cells}</div><h2 class="section-title">${formatDate(selected)}</h2>
-    <div class="selected-events">${byDate.has(selected) ? byDate.get(selected).map(entries).join('') : '<p class="empty">Sin plazos ni cierres para este día.</p>'}</div>
-    <div class="mobile-agenda"><h2>Plazos y cierres del mes</h2>${byDate.size ?
+    <div class="selected-events">${byDate.has(selected) ? byDate.get(selected).map(entries).join('') : '<p class="empty">Sin eventos para este día.</p>'}</div>
+    <div class="mobile-agenda"><h2>Agenda del mes</h2>${byDate.size ?
       [...byDate.keys()].sort().map(day =>
         `<section><h3>${formatDate(day)}</h3>${byDate.get(day).map(entries).join('')}</section>`).join('') :
-      '<p class="empty">Sin plazos ni cierres para este mes.</p>'}</div></section>`;
+      '<p class="empty">Sin eventos para este mes.</p>'}</div></section>`;
 }
 function people() {
   return `<div class="catalog-grid">${Object.entries(catalogLabels).map(([group, label]) =>
@@ -492,29 +518,55 @@ function openForm(title, fields, submit, deleteAttrs = '') {
   });
   if (!dialog.open) dialog.showModal();
 }
-function caseEditor(id) {
+function startFollowup(id) {
+  if (!canManage()) return;
+  const source = data.cases.find(record => record.id === id);
+  if (!source || !isFinalizedMatrix(source)) return;
+  const linked = existingFollowup(source);
+  if (linked) { caseEditor(linked.id); return; }
+  const type = sortedCatalog('types').find(item => item.mode === 'followup' && item.active);
+  if (!type) { notify('Activa un tipo de seguimiento en Catálogos.'); return; }
+  if (!matrixResponse(source.responseOffice)) {
+    caseEditor(id, null, 'Para crear el seguimiento, corrige el oficio de respuesta de esta matriz con el formato ST/DIPT/DRIGCT No. 123.');
+    return;
+  }
+  caseEditor('', source);
+}
+function caseEditor(id, source = null, message = '') {
   const analyst = !canManage();
   const existing = data.cases.find(record => record.id === id);
   if (analyst && !existing) return;
-  const record = existing ?? { assigned: today() };
-  const currentType = existing ? record.type ?? 'matrix' : '';
+  const draft = source ? {
+    sourceMatrixId: source.id, office: source.office, number: source.number, matrix: source.matrix,
+    topic: source.topic, person: source.person, department: source.department, notes: source.notes,
+    origin: matrixResponse(source.responseOffice), assigned: today(),
+    type: sortedCatalog('types').find(item => item.mode === 'followup' && item.active)?.id
+  } : { assigned: today() };
+  const record = existing ?? draft;
+  const parent = source ?? data.cases.find(item => item.id === record.sourceMatrixId);
+  const currentType = record.type ?? (existing ? 'matrix' : '');
+  const linked = !analyst && existing && isFinalizedMatrix(existing) ? existingFollowup(existing) : null;
+  const followupButton = !analyst && existing && isFinalizedMatrix(existing)
+    ? `<button type="button" class="action" data-start-followup="${escape(id)}">${linked ? 'Ver seguimiento' : 'Crear seguimiento'}</button>` : '';
   const options = sortedCatalog('people').filter(person => person.active || person.id === record.person);
   if (!analyst && !options.length) {
     notify('Activa o añade un analista antes de asignar un caso.');
     return;
   }
   const field = (key, label, limit, required = true) => `<label>${label}<input name="${key}" value="${escape(record[key])}" maxlength="${limit}" ${required ? 'required' : ''}></label>`;
-  openForm(existing ? 'Editar caso' : 'Nuevo caso', `
+  openForm(existing ? 'Editar caso' : source ? 'Crear seguimiento' : 'Nuevo caso', `
+    ${message ? `<p class="edit-scope">${escape(message)}</p>` : ''}
+    ${parent ? `<p class="edit-scope">Matriz de origen <strong>${escape(parent.matrix || parent.number || parent.topic)}</strong></p>` : ''}
     ${analyst ? '<p class="edit-scope">Puedes editar el tema, la dependencia solicitante y las observaciones.</p>' : ''}
-    <div class="fields">${field('office', 'Oficio de ingreso', 100, !record.historical)}${field('number', 'Número de caso', 100, !record.historical)}</div>
+    <div class="fields">${field('office', 'Oficio de ingreso', 100, !record.historical && !record.sourceMatrixId)}${field('number', 'Número de caso', 100, !record.historical && !record.sourceMatrixId)}</div>
     ${field('matrix', 'Número de matriz', 100, false)}
     ${field('topic', 'Tema', 300)}
-    <label>Tipo de caso<select name="type" required><option value="">Seleccionar tipo</option>${catalogOptions('types', currentType)}</select></label>
-    <label>Dependencia solicitante<select name="department" ${record.historical ? '' : 'required'}><option value="">Seleccionar dependencia</option>${catalogOptions('departments', record.department)}</select></label>
+    <label>Tipo de caso<select name="type" required ${record.sourceMatrixId ? 'disabled' : ''}><option value="">Seleccionar tipo</option>${catalogOptions('types', currentType)}</select></label>
+    <label>Dependencia solicitante<select name="department" ${(record.historical || record.sourceMatrixId) ? '' : 'required'}><option value="">Seleccionar dependencia</option>${catalogOptions('departments', record.department)}</select></label>
     <label id="research-field" hidden>Responsable de investigación<select name="researcher"><option value="">Seleccionar responsable</option>${catalogOptions('researchers', record.researcher)}</select></label>
     <label id="followup-field" hidden>Oficio de la matriz enviada
-      <input name="origin" list="matrix-offices" maxlength="100" value="${escape(record.origin)}" placeholder="Seleccionar o escribir el oficio">
-      <datalist id="matrix-offices">${[...new Set(data.cases.filter(item => item.id !== id && typeOf(item)?.mode !== 'followup').map(item => item.office))]
+      <input name="origin" list="matrix-offices" maxlength="100" value="${escape(record.origin)}" placeholder="ST/DIPT/DRIGCT No. 123" ${record.sourceMatrixId ? 'readonly' : ''}>
+      <datalist id="matrix-offices">${[...new Set(data.cases.filter(isFinalizedMatrix).map(item => matrixResponse(item.responseOffice)).filter(Boolean))]
       .map(office => `<option value="${escape(office)}"></option>`).join('')}</datalist></label>
     <label>Analista<select name="person" required><option value="">Seleccionar analista</option>${options.map(person =>
     `<option value="${escape(person.id)}" ${record.person === person.id ? 'selected' : ''}>${escape(person.name)}${person.active ? '' : ' (inactivo)'}</option>`).join('')}</select></label>
@@ -528,10 +580,13 @@ function caseEditor(id) {
     <label>Observaciones<textarea name="notes" rows="2">${escape(record.notes)}</textarea></label>`,
     (form, values) => {
       if (analyst) { void saveAnalystCase(record, values, form); return; }
-      const { person, assigned, due, state, type, department } = values;
+      const { person, assigned, due, state, department } = values;
+      const type = record.sourceMatrixId ? currentType : values.type;
       const mode = entryOf('types', type)?.mode;
       const researcher = mode === 'research' ? values.researcher : '';
-      const origin = mode === 'followup' ? values.origin?.trim() : '';
+      const rawOrigin = values.origin?.trim() ?? '';
+      const origin = mode === 'followup' ? matrixResponse(rawOrigin) ||
+        (existing?.origin === rawOrigin && typeOf(existing)?.mode === 'followup' ? rawOrigin : '') : '';
       const [office, number, topic] = ['office','number','topic'].map(key => values[key].trim());
       const error = form.querySelector('.error');
       const matrix = values.matrix.trim();
@@ -545,22 +600,26 @@ function caseEditor(id) {
       if (closedAt && (closedAt < assigned || (!unchangedClose && closedAt > today()))) {
         error.textContent = 'La fecha de cierre debe estar entre la asignación y hoy.'; return;
       }
-      if ((!record.historical && (!office || !number)) || !topic) { error.textContent = 'Completa el oficio, el número de caso y el tema.'; return; }
-      if (!mode || ((department || !record.historical) && !entryOf('departments', department))) { error.textContent = 'Selecciona el tipo de caso y la dependencia solicitante.'; return; }
+      if ((!record.historical && !record.sourceMatrixId && (!office || !number)) || !topic) { error.textContent = 'Completa el oficio, el número de caso y el tema.'; return; }
+      if (!mode || ((department || (!record.historical && !record.sourceMatrixId)) && !entryOf('departments', department))) { error.textContent = 'Selecciona el tipo de caso y la dependencia solicitante.'; return; }
       if (mode === 'research' && !entryOf('researchers', researcher)) { error.textContent = 'Selecciona el responsable de investigación.'; return; }
-      if (mode === 'followup' && !origin) { error.textContent = 'Indica el oficio de la matriz enviada.'; return; }
+      if (mode === 'followup' && !origin) { error.textContent = 'Indica el oficio de respuesta de la matriz con el formato ST/DIPT/DRIGCT No. 123.'; return; }
       if (due && due < assigned) { error.textContent = 'El plazo debe ser igual o posterior a la asignación.'; return; }
-      if (matrix && data.cases.some(item => item.id !== id && normalize(item.matrix ?? '') === normalize(matrix))) {
+      if (matrix && data.cases.some(item => item.id !== id && normalize(item.matrix ?? '') === normalize(matrix) &&
+          mode !== 'followup' && typeOf(item)?.mode !== 'followup')) {
         error.textContent = 'Ya existe un registro con ese número de matriz.'; return;
       }
-      if (!record.historical && number && data.cases.some(item => item.id !== id && normalize(item.number ?? '') === normalize(number) &&
+      if (!record.historical && !record.sourceMatrixId && number && data.cases.some(item => item.id !== id && normalize(item.number ?? '') === normalize(number) &&
         (mode === 'followup' ? normalize(item.office) === normalize(office) : typeOf(item)?.mode !== 'followup' || normalize(item.office) === normalize(office)))) {
         error.textContent = 'Ya existe un registro con el mismo número de caso para esta asignación.'; return;
+      }
+      if (source && existingFollowup(source)) {
+        error.textContent = 'Esta matriz ya tiene un seguimiento.'; return;
       }
       const item = { ...record, id: id || crypto.randomUUID(), office, number, matrix, topic, person, assigned, due,
         type, department, researcher, origin, closed, closedAt, responseOffice, notes: values.notes.trim() };
       save({ ...data, cases: existing ? data.cases.map(entry => entry.id === id ? item : entry) : [...data.cases, item] }, 'Caso guardado.');
-    }, existing && !analyst ? `<button type="button" class="action danger" data-delete-case="${escape(id)}">Eliminar</button>` : '');
+    }, existing && !analyst ? `${followupButton}<button type="button" class="action danger" data-delete-case="${escape(id)}">Eliminar</button>` : '');
   const typeSelect = dialog.querySelector('[name="type"]');
   const updateFields = () => {
     const mode = entryOf('types', typeSelect.value)?.mode;
@@ -674,7 +733,7 @@ function prepareImport(text) {
   const required = ['assigned','number','matrix','topic','closedAt','responseOffice','analyst','state'];
   const absent = required.filter(name => positions[name] < 0);
   if (absent.length) throw new Error('Faltan columnas: ' + absent.map(name => columns[name][0]).join(', ') + '.');
-  const existing = new Map(data.cases.filter(record => record.matrix).map(record => [normalize(record.matrix), record]));
+  const existing = new Map(data.cases.filter(record => record.matrix && typeOf(record)?.mode !== 'followup').map(record => [normalize(record.matrix), record]));
   const seen = new Set();
   const accepted = [], issues = [], repairs = new Map();
   const textFields = ['topic', 'notes', 'office', 'responseOffice'];
@@ -822,6 +881,7 @@ document.addEventListener('click', event => {
     main.querySelector('#search')?.focus();
   }
   if ('view' in dataset && (canManage() || ['dashboard','cases','calendar'].includes(dataset.view))) { view = dataset.view; render(); window.scrollTo(0, 0); }
+  if ('startFollowup' in dataset) startFollowup(dataset.startFollowup);
   if ('editCase' in dataset) caseEditor(dataset.editCase);
   if (canManage() && 'csv' in dataset) openCsvImport();
   if (canManage() && 'catalog' in dataset) catalogEditor(dataset.catalog, dataset.entry);
@@ -879,7 +939,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=11');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=12');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;

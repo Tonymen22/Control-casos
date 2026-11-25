@@ -111,3 +111,8 @@ button.chart-row .chart-caption>span,.drill-link{color:#214dad;text-decoration:u
 .badge-late{color:#9e253c;background:#fce8ed}
 .badge-closed{color:#17664e;background:#e0f4ea}
 @media(max-width:600px){.case.case-card>button.case-card-open{padding:11px}.case-title{flex-basis:10rem}.case-badges{gap:5px}}
+
+.event-reminder{background:#fff0d2;color:#754b13}
+.followup-reminders{margin-bottom:16px}
+.followup-reminders .event{margin-bottom:6px;padding:8px 12px;font-size:14px}
+.calendar-cell .day:has(+ .events .event-reminder){box-shadow:inset 0 -3px #dba64b}
