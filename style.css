@@ -141,3 +141,21 @@ button.dashboard-chart-action .chart-caption>span{color:inherit;text-decoration:
 .chart-end{display:inline-flex;align-items:center;gap:6px;flex:none}
 .dashboard-chevron{color:#3b68b4;font-size:1rem;line-height:1}
 @media(max-width:600px){.case-sort-label{flex:1 1 auto}}
+
+.pending-tray{margin-bottom:16px}
+.pending-tray h2{margin-bottom:10px}
+.pending-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,178px),1fr));gap:8px}
+.pending-option{display:grid;grid-template-columns:1fr auto;gap:4px 10px;align-items:center;text-align:left;padding:11px 12px;border:1px solid #c5d6ef;border-radius:12px;background:#edf4ff;color:#234579;font:inherit;cursor:pointer}
+.pending-option>span:first-child{grid-column:1/-1;font-size:.85rem;font-weight:650}
+.pending-option strong{font-size:1.4rem}
+.pending-overdue{background:#fff0f3;border-color:#f3c7d1;color:#9c2943}
+.pending-upcoming,.pending-followups{background:#fff4e1;border-color:#ebd5a9;color:#745019}
+.pending-option:hover{box-shadow:0 2px 8px #23457930}
+.case-history{border:1px solid #d8e5f5;border-radius:12px;padding:10px;background:#f6f9fd;color:#2b4164}
+.case-history summary{font-weight:700;cursor:pointer}
+.history-status{font-size:.9rem;margin:8px 0 0}
+.history-status:empty,.history-timeline:empty{display:none}
+.history-timeline{padding:0 0 0 12px;margin:12px 0;list-style:none;border-inline-start:2px solid #b5cbed}
+.history-timeline li{position:relative;padding:0 0 12px;font-size:.88rem;overflow-wrap:anywhere}
+.history-timeline li::before{content:"";position:absolute;inset-inline-start:-17px;top:5px;width:8px;height:8px;border-radius:50%;background:#527dca}
+.history-timeline small{display:block;color:#496084;margin:3px 0 5px}

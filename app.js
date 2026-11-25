@@ -64,6 +64,7 @@ let query = '';
 let filter = '';
 let drillFilter = null;
 let caseTab = '';
+let pendingFilter = '';
 let caseSort = 'correlativo';
 let noticeTimer;
 const dateFormat = new Intl.DateTimeFormat('es-GT', { dateStyle: 'medium', timeZone: 'UTC' });
@@ -189,6 +190,7 @@ async function loadWorkspace({ quiet = false } = {}) {
       filter = '';
       drillFilter = null;
       caseTab = '';
+      pendingFilter = '';
       query = '';
     }
     role = nextRole;
@@ -227,6 +229,7 @@ function activateSession(session) {
   filter = '';
   drillFilter = null;
   caseTab = '';
+  pendingFilter = '';
   if (dialog.open) dialog.close();
   document.querySelector('#notice').textContent = '';
   if (!account) {
@@ -338,6 +341,25 @@ const caseOrders = {
 };
 
 
+const pendingCategories = {
+  overdue: ['Vencidos', (record,date) => !record.closed && Boolean(record.due) && record.due < date],
+  upcoming: ['Vencen en 7 días', (record,date) => {
+    if (record.closed || !record.due) return false;
+    const days = (Date.parse(record.due) - Date.parse(date)) / 86400000;
+    return days >= 0 && days <= 7;
+  }],
+  undated: ['Sin plazo', record => !record.closed && !record.due],
+  followups: ['Seguimientos por iniciar', record => Boolean(followupDate(record))]
+};
+function pendingTray() {
+  const date = today();
+  return `<section class="card pending-tray"><h2>${canManage() ? 'Bandeja de pendientes' : 'Mis pendientes'}</h2>
+    <div class="pending-grid">${Object.entries(pendingCategories)
+      .filter(([key]) => key !== 'followups' || canManage())
+      .map(([key,[label,match]]) => `<button type="button" class="pending-option pending-${key}" data-pending="${key}">
+        <span>${label}</span><strong>${data.cases.filter(record => match(record,date)).length}</strong>
+        <span aria-hidden="true" class="dashboard-chevron">›</span></button>`).join('')}</div></section>`;
+}
 function dashboard() {
   const open = data.cases.filter(record => !record.closed);
   const closed = data.cases.filter(record => record.closed);
@@ -405,7 +427,7 @@ function dashboard() {
       '<p class="empty">Sin casos registrados.</p>'}</section>`;
 
   };
-  return `<div class="stats">${counts.map(([label, count], index) => `<div class="card stat stat-${index}"><span>${label}</span><strong>${count}</strong></div>`).join('')}</div>
+  return `${pendingTray()}<div class="stats">${counts.map(([label, count], index) => `<div class="card stat stat-${index}"><span>${label}</span><strong>${count}</strong></div>`).join('')}</div>
     <div class="dashboard-grid">
     ${breakdown('Carga por analista', 'Analista', 'people', record => caseGroupLabel('people', record))}
     ${breakdown('Casos por tipo', 'Tipo', 'types', record => caseGroupLabel('types', record))}
@@ -420,7 +442,10 @@ function dashboard() {
     <section class="card"><h2 class="section-title">${canManage() ? 'Plazos pendientes' : 'Mis próximos plazos'}</h2>${caseRows(remaining.sort(sortDue).slice(0, 8), 'Aquí aparecerán los plazos de los casos abiertos.')}</section>`;
 }
 function filteredCases() {
+  const date = today();
+  const pendingMatch = pendingCategories[pendingFilter]?.[1];
   const matches = data.cases.filter(record => (!filter || record.person === filter) && (!caseTab || caseMode(record) === caseTab) &&
+    (!pendingMatch || pendingMatch(record,date)) &&
     (!drillFilter || caseGroupLabel(drillFilter.kind, record) === drillFilter.label) &&
     normalize([record.topic, record.number, record.matrix, record.followupNumber, record.office, record.responseOffice, nameOf(record.person), typeOf(record)?.name, entryOf('departments', record.department)?.name].join(' ')).includes(normalize(query.trim())));
   main.querySelector('#case-results').innerHTML = caseRows(matches.sort(caseOrders[caseSort][1]), 'No hay casos que coincidan.');
@@ -429,7 +454,9 @@ function cases() {
   const tabs = [['','Todos'], ...Object.entries(caseCategories)];
   return `<section class="card"><div class="case-tabs" role="group" aria-label="Tipo de caso">
     ${tabs.map(([mode,label]) => `<button type="button" class="case-tab case-kind-${mode || 'all'}" data-case-tab="${mode}"
-      aria-pressed="${mode === caseTab}">${label}</button>`).join('')}</div>${drillFilter ? `<div class="toolbar active-filter">
+      aria-pressed="${mode === caseTab}">${label}</button>`).join('')}</div>
+    ${pendingFilter ? `<div class="toolbar active-filter"><strong>${pendingCategories[pendingFilter][0]}</strong>
+      <button type="button" class="action" data-clear-drill>Limpiar filtro</button></div>` : ''}${drillFilter ? `<div class="toolbar active-filter">
     <span><strong>${({people:'Analista', departments:'Dependencia solicitante', types:'Tipo de caso'})[drillFilter.kind]}</strong> · ${escape(drillFilter.label)}</span>
     <button class="action" data-clear-drill>Limpiar filtro</button></div>` : ''}<div class="toolbar"><input id="search" type="search" aria-label="Buscar casos" placeholder="Buscar por correlativo, caso, oficio o tema" value="${escape(query)}">
     <select id="filter" aria-label="Filtrar por analista"><option value="">Todos los analistas</option>${sortedCatalog('people').map(person =>
@@ -600,6 +627,64 @@ function startFollowup(id) {
   }
   caseEditor('', source);
 }
+const historyLabels = {
+  person:'Analista', researcher:'Investigación', department:'Dependencia', type:'Tipo',
+  assigned:'Asignación', due:'Plazo', closedAt:'Fecha de cierre', responseOffice:'Oficio de respuesta',
+  office:'Oficio de ingreso', number:'Número de caso', matrix:'Matriz', followupNumber:'Seguimiento',
+  origin:'Oficio de la matriz enviada', topic:'Tema'
+};
+const historyEventNames = {
+  created:'Caso registrado', imported:'Caso importado', closed:'Caso finalizado',
+  reopened:'Caso reabierto', updated:'Caso actualizado', deleted:'Caso eliminado'
+};
+const historyClock = new Intl.DateTimeFormat('es-GT', {dateStyle:'medium', timeStyle:'short', timeZone:'America/Guatemala'});
+function historyItem(row) {
+  const changes = row.changes ?? {};
+  const title = row.event_type === 'updated' && Object.hasOwn(changes,'person') ? 'Caso reasignado'
+    : row.event_type === 'updated' && Object.hasOwn(changes,'due') ? 'Plazo actualizado'
+    : historyEventNames[row.event_type] ?? 'Cambio registrado';
+  return `<li><strong>${title}</strong><small>${escape(row.actor_label)} · ${escape(historyClock.format(new Date(row.occurred_at)))}</small>
+    ${Object.entries(changes).filter(([key]) => Object.hasOwn(historyLabels,key)).map(([key,[before,after]]) => {
+      const display = value => escape(!value ? 'Sin dato' : ['assigned','due','closedAt'].includes(key) ? formatDate(value) : value);
+      return `<div><b>${historyLabels[key]}</b> ${before == null ? display(after) : `${display(before)} → ${display(after)}`}</div>`;
+    }).join('')}</li>`;
+}
+function attachHistory(id) {
+  const panel = dialog.querySelector('#case-history');
+  const status = panel.querySelector('.history-status');
+  const timeline = panel.querySelector('ol');
+  const more = panel.querySelector('button');
+  let loaded = false;
+  let loading = false;
+  let cursor = null;
+  const request = generation;
+  const fetchPage = async () => {
+    if (loading) return;
+    loading = true;
+    more.hidden = true;
+    status.textContent = 'Cargando historial…';
+    try {
+      const {data: rows, error} = await client.rpc('risk_read_case_history', {p_case_id:id,p_before:cursor});
+      if (request !== generation || !panel.isConnected) return;
+      if (error) throw error;
+      timeline.insertAdjacentHTML('beforeend', rows.map(historyItem).join(''));
+      if (rows.length) cursor = rows.at(-1).id;
+      status.textContent = !loaded && !rows.length ? 'Aún no hay cambios registrados.' : '';
+      loaded = true;
+      more.textContent = 'Ver cambios anteriores';
+      more.hidden = rows.length < 30;
+    } catch {
+      if (request !== generation || !panel.isConnected) return;
+      status.textContent = 'No se pudo cargar el historial.';
+      more.textContent = 'Reintentar';
+      more.hidden = false;
+    } finally {
+      loading = false;
+    }
+  };
+  panel.addEventListener('toggle', () => { if (panel.open && !loaded) void fetchPage(); });
+  more.addEventListener('click', () => void fetchPage());
+}
 function caseEditor(id, source = null, message = '') {
   const analyst = !canManage();
   const existing = data.cases.find(record => record.id === id);
@@ -648,7 +733,10 @@ function caseEditor(id, source = null, message = '') {
       <label>Fecha de cierre<input name="closedAt" type="date" value="${escape(record.closedAt)}"></label>
       ${field('responseOffice', 'Oficio de respuesta', 100, false)}
     </div>
-    <label>Observaciones<textarea name="notes" rows="2">${escape(record.notes)}</textarea></label>`,
+    <label>Observaciones<textarea name="notes" rows="2">${escape(record.notes)}</textarea></label>
+    ${existing ? `<details id="case-history" class="case-history"><summary>Historial del caso</summary>
+      <p class="history-status" role="status"></p><ol class="history-timeline"></ol>
+      <button type="button" class="action" hidden>Ver cambios anteriores</button></details>` : ''}`,
     (form, values) => {
       if (analyst) { void saveAnalystCase(record, values, form); return; }
       const { person, assigned, due, state, department } = values;
@@ -758,6 +846,7 @@ function caseEditor(id, source = null, message = '') {
       if (!editable.includes(input.name)) input.disabled = true;
     });
   }
+  if (existing) attachHistory(id);
   const submitButton = dialog.querySelector('form .primary');
   const updateLabel = () => {
     submitButton.textContent = !existing?.closed && stateSelect.value === 'closed' ? 'Finalizar caso' : 'Guardar';
@@ -965,7 +1054,20 @@ document.addEventListener('click', event => {
     void save(localData, 'Datos importados a Supabase.');
   }
   if (!ready) return;
+  if ('pending' in dataset && view === 'dashboard' && Object.hasOwn(pendingCategories,dataset.pending) &&
+      (dataset.pending !== 'followups' || canManage())) {
+    pendingFilter = dataset.pending;
+    drillFilter = null;
+    caseTab = '';
+    filter = '';
+    query = '';
+    view = 'cases';
+    render();
+    window.scrollTo(0,0);
+    main.querySelector('h1')?.focus({preventScroll:true});
+  }
   if ('drillKind' in dataset && view === 'dashboard' && ['people','departments','types'].includes(dataset.drillKind)) {
+    pendingFilter = '';
     drillFilter = {kind:dataset.drillKind, label:dataset.drillLabel};
     const type = dataset.drillKind === 'types'
       ? data.types.find(type => type.name === dataset.drillLabel) ??
@@ -991,6 +1093,7 @@ document.addEventListener('click', event => {
     filteredCases();
   }
   if ('clearDrill' in dataset && view === 'cases') {
+    pendingFilter = '';
     drillFilter = null;
     caseTab = '';
     filter = '';
@@ -1061,7 +1164,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=14');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=15');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;
