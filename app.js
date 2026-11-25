@@ -55,6 +55,7 @@ const views = {
   dashboard: ['Dashboard', 'Consulta la carga de trabajo y los próximos vencimientos.'],
   cases: ['Casos', 'Registra, asigna y actualiza los casos de riesgos.'],
   calendar: ['Calendario', 'Consulta los plazos y las fechas de cierre.'],
+  reports: ['Reportes', 'Consulta el informe mensual y guárdalo como PDF.'],
   people: ['Catálogos', 'Administra los tipos de caso, responsables y dependencias solicitantes.']
 };
 let view = 'dashboard';
@@ -66,6 +67,8 @@ let drillFilter = null;
 let caseTab = '';
 let pendingFilter = '';
 let caseSort = 'correlativo';
+const defaultReport = () => ({month:today().slice(0,7),person:'',department:'',type:'',details:true,notes:false});
+let reportSettings = defaultReport();
 let noticeTimer;
 const dateFormat = new Intl.DateTimeFormat('es-GT', { dateStyle: 'medium', timeZone: 'UTC' });
 const monthFormat = new Intl.DateTimeFormat('es-GT', { month: 'long', year: 'numeric', timeZone: 'UTC' });
@@ -230,6 +233,7 @@ function activateSession(session) {
   drillFilter = null;
   caseTab = '';
   pendingFilter = '';
+  reportSettings = defaultReport();
   if (dialog.open) dialog.close();
   document.querySelector('#notice').textContent = '';
   if (!account) {
@@ -477,8 +481,8 @@ function existingFollowup(source) {
       ((source.matrix && item.matrix === source.matrix) || (source.number && item.number === source.number &&
         (!source.matrix || !item.matrix))))));
 }
-function followupDate(record) {
-  if (!canManage() || !record.closedAt || !isFinalizedMatrix(record) || existingFollowup(record)) return '';
+function followupDate(record, includeLinked = false) {
+  if (!canManage() || !record.closedAt || !isFinalizedMatrix(record) || (!includeLinked && existingFollowup(record))) return '';
   const [year, month, day] = record.closedAt.split('-').map(Number);
   const last = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
   return new Date(Date.UTC(year, month, Math.min(day, last))).toISOString().slice(0,10);
@@ -534,6 +538,133 @@ function people() {
         <small>${entry.active ? 'Activo' : 'Inactivo'}${entry.mode ? ' · ' + typeDetails[entry.mode] : ''}</small></div>
         <button class="action" data-catalog="${group}" data-entry="${escape(entry.id)}" aria-label="Editar ${escape(entry.name)}">Editar</button></article>`).join('')}</section>`).join('')}</div>`;
 }
+function reportData(settings, currentDate = today()) {
+  const [year, monthNumber] = settings.month.split('-').map(Number);
+  const start = settings.month + '-01';
+  const end = new Date(Date.UTC(year, monthNumber, 0)).toISOString().slice(0,10);
+  const cutoff = currentDate < end ? currentDate : end;
+  const inPeriod = date => Boolean(date && date >= start && date <= cutoff);
+  const scope = data.cases.filter(record =>
+    (!settings.person || record.person === settings.person) &&
+    (!settings.department || record.department === settings.department) &&
+    (!settings.type || caseMode(record) === settings.type));
+  const records = scope.map(record => {
+    const assigned = inPeriod(record.assigned);
+    const closed = record.closed && inPeriod(record.closedAt);
+    const pending = Boolean(record.assigned && record.assigned <= cutoff &&
+      (!record.closed || (record.closedAt && record.closedAt > cutoff)));
+    return {record, assigned, closed, pending, overdue: pending && record.due && record.due < cutoff};
+  }).filter(row => row.assigned || row.closed || row.pending);
+  const closed = records.filter(row => row.closed).map(row => row.record);
+  const measured = closed.filter(record => record.due);
+  const durations = closed.filter(record => record.assigned && record.assigned <= record.closedAt)
+    .map(record => (Date.parse(record.closedAt) - Date.parse(record.assigned))/86400000);
+  const followups = scope.filter(record => isFinalizedMatrix(record) && inPeriod(record.closedAt));
+  return {start, cutoff, records, measured, durations, followups,
+    undetermined: scope.filter(record => record.closed && !record.closedAt && record.assigned && record.assigned <= cutoff).length};
+}
+function reportBreakdown(rows, kind, title, column) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const label = caseGroupLabel(kind,row.record);
+    const counts = grouped.get(label) ?? {assigned:0,closed:0,pending:0,total:0};
+    counts.assigned += Number(row.assigned);
+    counts.closed += Number(row.closed);
+    counts.pending += Number(row.pending);
+    counts.total++;
+    grouped.set(label,counts);
+  }
+  const entries = [...grouped].sort(([a,av],[b,bv]) => bv.total-av.total || compareNames(a,b));
+  const maximum = entries[0]?.[1].total || 1;
+  return `<section class="report-block"><h3>${title}</h3>${entries.length ?
+    `<table><thead><tr><th>${column}</th><th>Asignados</th><th>Finalizados</th><th>Pendientes</th></tr></thead><tbody>
+    ${entries.map(([label,counts]) => `<tr><th scope="row">${escape(label)}
+    ${kind === 'types' ? `<span class="report-bar" aria-hidden="true"><span style="width:${counts.total / maximum * 100}%"></span></span>` : ''}</th>
+    <td>${counts.assigned}</td><td>${counts.closed}</td><td>${counts.pending}</td></tr>`).join('')}</tbody></table>` :
+    '<p>Sin casos para los filtros seleccionados.</p>'}</section>`;
+}
+function reportPreview(settings) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(settings.month) || settings.month > today().slice(0,7)) {
+    return '<p class="empty">Selecciona un mes válido, hasta el mes actual.</p>';
+  }
+  const {start, cutoff, records, measured, durations, followups, undetermined} = reportData(settings);
+  const e = escape;
+  const count = key => records.filter(row => row[key]).length;
+  const onTime = measured.filter(record => record.closedAt <= record.due).length;
+  const average = durations.length ? new Intl.NumberFormat('es-GT',{maximumFractionDigits:1})
+    .format(durations.reduce((sum,days) => sum+days,0)/durations.length) : '—';
+  const title = settings.person ? 'Informe mensual por analista' : 'Informe mensual consolidado';
+  const scope = [settings.person ? nameOf(settings.person) : 'Todo el equipo',
+    settings.department ? entryOf('departments',settings.department)?.name : '',
+    settings.type ? caseCategories[settings.type] : ''].filter(Boolean).join(' · ');
+  const summary = [['Asignados',count('assigned')],['Finalizados',count('closed')],['Pendientes al corte',count('pending')],
+    ['Vencidos al corte', count('overdue')], ['Pendientes sin plazo',records.filter(row => row.pending && !row.record.due).length],
+    ['Cierres a tiempo', measured.length ? onTime + ' de ' + measured.length + ' (' + new Intl.NumberFormat('es-GT',{style:'percent',maximumFractionDigits:1}).format(onTime/measured.length) + ')' : '—'],
+    ['Cierres fuera de plazo',measured.length ? measured.length-onTime : '—'],
+    ['Promedio de cierre (días calendario)',average]];
+  const date = value => value ? e(formatDate(value)) : '—';
+  const field = (label,value) => `<span><b>${label}</b> ${value}</span>`;
+  return `<article class="report-paper">
+    <header class="report-heading"><div class="eyebrow">Gestión de Riesgos</div><h2>${title}</h2>
+      <p>${e(scope)}</p><p>${date(start)} al ${date(cutoff)} · Generado el ${date(today())}</p></header>
+    <div class="report-stats">${summary.map(([label,value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join('')}</div>
+    <p class="report-note">Asignaciones y cierres se cuentan por sus respectivas fechas. Los pendientes al corte se estiman con las fechas y asignaciones actuales. Los cambios de responsable, reaperturas y eliminaciones pueden modificar un corte anterior. El cumplimiento considera solo cierres con plazo registrado.${undetermined ? ' Hay ' + undetermined + ' casos cerrados sin fecha que quedaron fuera del cálculo de pendientes al corte.' : ''}</p>
+    ${settings.person ? '' : reportBreakdown(records,'people','Carga por analista','Analista')}
+    ${reportBreakdown(records,'types','Distribución por tipo','Tipo de caso')}
+    ${reportBreakdown(records,'departments','Distribución por dependencia','Dependencia')}
+    ${followups.length ? `<section class="report-block"><h3>Seguimientos de matrices cerradas en el mes</h3>
+      <table><thead><tr><th>Matriz</th><th>Oficio de respuesta</th><th>Inicio previsto</th><th>Seguimiento</th></tr></thead><tbody>
+      ${followups.slice().sort(byCorrelative).map(record => {
+        const link = existingFollowup(record);
+        const planned = followupDate(record, true);
+        return `<tr><th scope="row">${e(record.matrix || record.number || record.topic)}</th><td>${e(record.responseOffice || '—')}</td>
+          <td>${date(planned)}</td><td>${link ? e([link.followupNumber,status(link)[0]].filter(Boolean).join(' · ')) : 'Por iniciar'}</td></tr>`;
+      }).join('')}</tbody></table></section>` : ''}
+    ${settings.details ? `<section class="report-block report-details"><h3>Detalle de casos</h3>
+      ${records.length ? records.slice().sort((a,b) => byCorrelative(a.record,b.record)).map(({record,assigned,closed,pending,overdue}) =>
+      `<div class="report-case">
+        <h4>${e(caseIdentifier(record) || record.number || 'Sin correlativo')} · ${e(record.topic)}</h4>
+        <p class="report-case-scope">${[assigned && 'Asignado en el mes',closed && 'Finalizado en el mes',pending && (overdue ? 'Vencido al corte' : 'Pendiente al corte')].filter(Boolean).join(' · ')}</p>
+        <div class="report-case-fields">
+          ${field('Tipo',e(caseGroupLabel('types',record)))}${field('Caso',e(record.number || '—'))}
+          ${field('Analista',e(nameOf(record.person)))}${field('Dependencia',e(caseGroupLabel('departments',record)))}
+          ${record.researcher ? field('Investigación',e(entryOf('researchers',record.researcher)?.name || '—')) : ''}
+          ${field('Oficio de ingreso',e(record.office || '—'))}${field('Oficio de respuesta',e(record.responseOffice || '—'))}
+          ${field('Asignado',date(record.assigned))}${field('Plazo',date(record.due))}${field('Cierre',date(record.closedAt))}
+          ${caseMode(record) === 'followup' && record.matrix ? field('Matriz de origen',e(record.matrix)) : ''}
+          ${record.origin ? field('Oficio de la matriz enviada',e(record.origin)) : ''}
+        </div>${settings.notes && record.notes ? `<p class="report-notes"><b>Observaciones</b> ${e(record.notes)}</p>` : ''}</div>`).join('') :
+        '<p>Sin casos para los filtros seleccionados.</p>'}</section>` : ''}
+  </article>`;
+}
+function reports() {
+  const settings = reportSettings;
+  const options = (group,key) => sortedCatalog(group).map(entry =>
+    `<option value="${escape(entry.id)}" ${settings[key] === entry.id ? 'selected' : ''}>${escape(entry.name)}</option>`).join('');
+  return `<section class="card report-controls"><form id="report-settings">
+    <div class="report-filters">
+      <label>Mes<input name="month" type="month" value="${escape(settings.month)}" max="${today().slice(0,7)}" required></label>
+      <label>Alcance<select name="person"><option value="">Consolidado del equipo</option>${options('people','person')}</select></label>
+      <label>Dependencia<select name="department"><option value="">Todas</option>${options('departments','department')}</select></label>
+      <label>Tipo de caso<select name="type"><option value="">Todos</option>${Object.entries(caseCategories).map(([key,label]) =>
+        `<option value="${key}" ${key === settings.type ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+    </div><div class="report-actions">
+      <label><input name="details" type="checkbox" ${settings.details ? 'checked' : ''}> Incluir detalle de casos</label>
+      <label><input name="notes" type="checkbox" ${settings.notes ? 'checked' : ''} ${settings.details ? '' : 'disabled'}> Incluir observaciones</label>
+      <button type="submit" class="action primary">Generar PDF</button>
+    </div></form></section><section id="report-preview" aria-label="Vista previa del informe">${reportPreview(settings)}</section>`;
+}
+function updateReport(form) {
+  const values = new FormData(form);
+  reportSettings = {
+    month: String(values.get('month') ?? ''), person:String(values.get('person') ?? ''),
+    department:String(values.get('department') ?? ''), type:String(values.get('type') ?? ''),
+    details:values.has('details'), notes:form.elements.notes.checked
+  };
+  form.elements.notes.disabled = !reportSettings.details;
+  main.querySelector('#report-preview').innerHTML = reportPreview(reportSettings);
+}
+
 function render() {
   if (!ready) return;
   shell.hidden = false;
@@ -545,18 +676,18 @@ function render() {
     ? '<div class="card import-card"><p>Hay datos de una versión anterior en este dispositivo.</p><button class="action" data-import>Importar a esta cuenta</button></div>'
     : '';
   document.querySelectorAll('nav button').forEach(button => {
-    button.hidden = !canManage() && button.dataset.view === 'people';
+    button.hidden = !canManage() && ['people','reports'].includes(button.dataset.view);
     if (button.dataset.view === view) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
   });
   const [title, description] = !canManage() && view === 'cases'
     ? ['Mis casos', 'Consulta y actualiza los casos que tienes asignados.'] :
     !canManage() && view === 'dashboard' ? ['Dashboard global', 'Consulta los indicadores y la carga de trabajo de todo el equipo.'] : views[view];
-  const action = !canManage() || view === 'people' ? '' :
+  const action = !canManage() || ['people','reports'].includes(view) ? '' :
     '<button class="action primary" data-edit-case="">+ Nuevo caso</button>' + (view === 'cases' ? ' <button class="action" data-csv>Importar Excel</button>' : '');
   main.innerHTML = `<header><div><div class="eyebrow">Gestión de Riesgos</div><h1 tabindex="-1">${title}</h1><p>${description}</p></div>${action ? `<div class="header-actions">${action}</div>` : ''}</header>
     ${importButton}
-    ${({ dashboard, cases, calendar, people })[view]()}`;
+    ${({ dashboard, cases, calendar, people, reports })[view]()}`;
   if (view === 'cases') filteredCases();
 }
 async function saveAnalystCase(record, values, form) {
@@ -1128,6 +1259,7 @@ main.addEventListener('input', event => {
   if (event.target.id === 'search') { query = event.target.value; filteredCases(); }
 });
 main.addEventListener('change', event => {
+  if (view === 'reports' && canManage() && event.target.form?.id === 'report-settings') updateReport(event.target.form);
   if (event.target.id === 'case-sort' && Object.hasOwn(caseOrders,event.target.value)) {
     caseSort = event.target.value;
     filteredCases();
@@ -1135,6 +1267,16 @@ main.addEventListener('change', event => {
   if (event.target.id === 'filter') { filter = event.target.value; filteredCases(); }
 });
 document.addEventListener('submit', async event => {
+  if (event.target.id === 'report-settings') {
+    event.preventDefault();
+    if (!ready || !canManage() || view !== 'reports') return;
+    updateReport(event.target);
+    if (main.querySelector('.report-paper')) {
+      if (typeof window.print === 'function') window.print();
+      else notify('Abre el informe en el navegador y usa su opción Imprimir para guardarlo como PDF.');
+    }
+    return;
+  }
   if (event.target.id !== 'login-form') return;
   event.preventDefault();
   const form = event.target;
@@ -1164,7 +1306,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=15');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=16');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;
