@@ -87,3 +87,9 @@ dialog form label:has(input:disabled),dialog form label:has(select:disabled){col
 .chart-track span:last-child{background:#16856d}
 .chart-note{font-size:.85rem;margin-bottom:10px}
 .dashboard-table td:nth-child(2){color:#233f75;background:#d8e6fc55}
+
+button.chart-row{display:block;width:100%;border:0;background:transparent;border-radius:7px;text-align:left;color:inherit;padding:4px 5px}
+button.chart-row:hover{background:#eaf1ff}
+button.chart-row .chart-caption>span,.drill-link{color:#214dad;text-decoration:underline;text-underline-offset:3px}
+.drill-link{font:inherit;font-weight:inherit;border:0;background:none;text-align:left;padding:4px 0;overflow-wrap:anywhere}
+.active-filter{padding:8px 12px;border:1px solid #c8dafb;background:#eef4ff;border-radius:12px;color:#234376}

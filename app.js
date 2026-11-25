@@ -42,6 +42,7 @@ try {
 let client;
 let account;
 let role;
+let analystCatalogId;
 let globalDashboard;
 const canManage = () => role === 'admin';
 let revision;
@@ -61,6 +62,7 @@ let selected = today();
 let month = selected.slice(0, 7);
 let query = '';
 let filter = '';
+let drillFilter = null;
 let noticeTimer;
 const dateFormat = new Intl.DateTimeFormat('es-GT', { dateStyle: 'medium', timeZone: 'UTC' });
 const monthFormat = new Intl.DateTimeFormat('es-GT', { month: 'long', year: 'numeric', timeZone: 'UTC' });
@@ -120,7 +122,7 @@ async function loadWorkspace({ quiet = false } = {}) {
   busy = true;
   const request = generation;
   try {
-    const membership = await client.from('risk_access').select('role').eq('user_id', account.id).maybeSingle();
+    const membership = await client.from('risk_access').select('role, catalog_id').eq('user_id', account.id).maybeSingle();
     if (request !== generation) return;
     if (membership.error) throw membership.error;
     const nextRole = membership.data?.role;
@@ -153,9 +155,11 @@ async function loadWorkspace({ quiet = false } = {}) {
     if (role !== nextRole) {
       view = admin ? 'dashboard' : 'cases';
       filter = '';
+      drillFilter = null;
       query = '';
     }
     role = nextRole;
+    analystCatalogId = membership.data.catalog_id;
     data = (admin ? result.data?.payload : result.data) ?? initial;
     if (!admin && globalDashboard.departments.length) data = { ...data, departments: globalDashboard.departments };
     revision = admin ? result.data?.revision ?? null : null;
@@ -179,6 +183,7 @@ function activateSession(session) {
   generation++;
   account = user;
   role = undefined;
+  analystCatalogId = undefined;
   globalDashboard = undefined;
   ready = false;
   busy = false;
@@ -187,6 +192,7 @@ function activateSession(session) {
   view = 'dashboard';
   query = '';
   filter = '';
+  drillFilter = null;
   if (dialog.open) dialog.close();
   document.querySelector('#notice').textContent = '';
   if (!account) {
@@ -254,6 +260,9 @@ function caseRows(records, empty) {
       <span class="pill ${tone}">${label}</span></article>`;
   }).join('');
 }
+const caseGroupLabel = (kind, record) => kind === 'people'
+  ? nameOf(record.person) : entryOf('departments', record.department)?.name ?? 'Sin dependencia registrada';
+
 function dashboard() {
   const open = data.cases.filter(record => !record.closed);
   const closed = data.cases.filter(record => record.closed);
@@ -296,37 +305,49 @@ function dashboard() {
     }
     const totalOf = ([opened, closed]) => Number(opened) + Number(closed);
     const rows = [...groups].sort(([a, av], [b, bv]) => totalOf(bv) - totalOf(av) || compareNames(a,b));
+    const drillAttrs = label => {
+      const allowed = kind === 'departments' || (kind === 'people' && (canManage() ||
+        (role === 'risk' && analystCatalogId && nameOf(analystCatalogId) === label)));
+      return allowed ? `data-drill-kind="${kind}" data-drill-label="${escape(label)}"
+        aria-label="Ver casos de ${escape(label)}"` : '';
+    };
     const maximum = rows.length ? Math.max(1, totalOf(rows[0][1])) : 1;
     return `<section class="card dashboard-table"><h2>${title}</h2>${rows.length ? `
       <div class="chart-legend" aria-hidden="true"><span>Abiertos</span><span>Cerrados</span></div>
-      <div class="dashboard-chart" aria-hidden="true">${rows.slice(0,6).map(([label, values]) => {
+      <div class="dashboard-chart">${rows.slice(0,6).map(([label, values]) => {
         const [opened, closed] = values;
-        return `<div class="chart-row"><div class="chart-caption"><span>${escape(label)}</span><strong>${totalOf(values)}</strong></div>
-          <div class="chart-track"><span style="width:${100 * opened / maximum}%"></span><span style="width:${100 * closed / maximum}%"></span></div></div>`;
+        const attrs = drillAttrs(label);
+        const tag = attrs ? 'button' : 'div';
+        return `<${tag} class="chart-row" ${attrs}><span class="chart-caption"><span>${escape(label)}</span><strong>${totalOf(values)}</strong></span>
+          <span class="chart-track"><span style="width:${100 * opened / maximum}%"></span><span style="width:${100 * closed / maximum}%"></span></span></${tag}>`;
       }).join('')}</div>
       ${rows.length > 6 ? '<p class="chart-note">Gráfica de los seis grupos con más casos.</p>' : ''}
       <div class="table-scroll"><table aria-label="${title}, de mayor a menor por total">
       <thead><tr><th>${column}</th><th aria-sort="descending">Total</th><th>Abiertos</th><th>Cerrados</th><th>Vencidos</th></tr></thead><tbody>
-      ${rows.map(([label, values]) =>
-        `<tr><th scope="row">${escape(label)}</th><td><strong>${totalOf(values)}</strong></td>${values.map(value => `<td>${value}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` :
+      ${rows.map(([label, values]) => {
+        const attrs = drillAttrs(label);
+        return `<tr><th scope="row">${attrs ? `<button class="drill-link" ${attrs}>${escape(label)}</button>` : escape(label)}</th><td><strong>${totalOf(values)}</strong></td>${values.map(value => `<td>${value}</td>`).join('')}</tr>`; }).join('')}</tbody></table></div>` :
       '<p class="empty">Sin casos registrados.</p>'}</section>`;
 
   };
   return `<div class="stats">${counts.map(([label, count], index) => `<div class="card stat stat-${index}"><span>${label}</span><strong>${count}</strong></div>`).join('')}</div>
     <div class="dashboard-grid">
-    ${breakdown('Carga por analista', 'Analista', 'people', record => nameOf(record.person))}
+    ${breakdown('Carga por analista', 'Analista', 'people', record => caseGroupLabel('people', record))}
     ${breakdown('Casos por tipo', 'Tipo', 'types', record => typeOf(record)?.name ?? 'Sin tipo')}
-    ${breakdown('Casos por dependencia', 'Dependencia', 'departments', record => entryOf('departments', record.department)?.name ?? 'Sin dependencia registrada')}
+    ${breakdown('Casos por dependencia', 'Dependencia', 'departments', record => caseGroupLabel('departments', record))}
     </div>
     <section class="card"><h2 class="section-title">${canManage() ? 'Plazos pendientes' : 'Mis próximos plazos'}</h2>${caseRows(remaining.sort(sortDue).slice(0, 8), 'Aquí aparecerán los plazos de los casos abiertos.')}</section>`;
 }
 function filteredCases() {
   const matches = data.cases.filter(record => (!filter || record.person === filter) &&
+    (!drillFilter || caseGroupLabel(drillFilter.kind, record) === drillFilter.label) &&
     normalize([record.topic, record.number, record.matrix, record.office, record.responseOffice, nameOf(record.person), typeOf(record)?.name, entryOf('departments', record.department)?.name].join(' ')).includes(normalize(query.trim())));
   main.querySelector('#case-results').innerHTML = caseRows(matches.sort(sortDue), 'No hay casos que coincidan.');
 }
 function cases() {
-  return `<section class="card"><div class="toolbar"><input id="search" type="search" aria-label="Buscar casos" placeholder="Buscar por caso, oficio o tema" value="${escape(query)}">
+  return `<section class="card">${drillFilter ? `<div class="toolbar active-filter">
+    <span><strong>${drillFilter.kind === 'people' ? 'Analista' : 'Dependencia solicitante'}</strong> · ${escape(drillFilter.label)}</span>
+    <button class="action" data-clear-drill>Limpiar filtro</button></div>` : ''}<div class="toolbar"><input id="search" type="search" aria-label="Buscar casos" placeholder="Buscar por caso, oficio o tema" value="${escape(query)}">
     <select id="filter" aria-label="Filtrar por analista"><option value="">Todos los analistas</option>${sortedCatalog('people').map(person =>
     `<option value="${escape(person.id)}" ${filter === person.id ? 'selected' : ''}>${escape(person.name)}</option>`).join('')}</select></div><div id="case-results"></div></section>`;
 }
@@ -399,7 +420,7 @@ function render() {
     !canManage() && view === 'dashboard' ? ['Dashboard global', 'Consulta los indicadores y la carga de trabajo de todo el equipo.'] : views[view];
   const action = !canManage() || view === 'people' ? '' :
     '<button class="action primary" data-edit-case="">+ Nuevo caso</button>' + (view === 'cases' ? ' <button class="action" data-csv>Importar Excel</button>' : '');
-  main.innerHTML = `<header><div><div class="eyebrow">Gestión de Riesgos</div><h1>${title}</h1><p>${description}</p></div>${action ? `<div class="header-actions">${action}</div>` : ''}</header>
+  main.innerHTML = `<header><div><div class="eyebrow">Gestión de Riesgos</div><h1 tabindex="-1">${title}</h1><p>${description}</p></div>${action ? `<div class="header-actions">${action}</div>` : ''}</header>
     ${importButton}
     ${({ dashboard, cases, calendar, people })[view]()}`;
   if (view === 'cases') filteredCases();
@@ -771,6 +792,22 @@ document.addEventListener('click', event => {
     void save(localData, 'Datos importados a Supabase.');
   }
   if (!ready) return;
+  if ('drillKind' in dataset && view === 'dashboard' && ['people','departments'].includes(dataset.drillKind)) {
+    drillFilter = {kind:dataset.drillKind, label:dataset.drillLabel};
+    filter = '';
+    query = '';
+    view = 'cases';
+    render();
+    window.scrollTo(0, 0);
+    main.querySelector('h1')?.focus({preventScroll:true});
+  }
+  if ('clearDrill' in dataset && view === 'cases') {
+    drillFilter = null;
+    filter = '';
+    query = '';
+    render();
+    main.querySelector('#search')?.focus();
+  }
   if ('view' in dataset && (canManage() || ['dashboard','cases','calendar'].includes(dataset.view))) { view = dataset.view; render(); window.scrollTo(0, 0); }
   if ('editCase' in dataset) caseEditor(dataset.editCase);
   if (canManage() && 'csv' in dataset) openCsvImport();
@@ -829,7 +866,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=9');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=10');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;
