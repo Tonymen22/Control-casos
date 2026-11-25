@@ -395,22 +395,32 @@ async function saveAnalystCase(record, values, form) {
   if (!ready || canManage() || busy) return;
   const topic = values.topic.trim();
   if (!topic) { errorText.textContent = 'Escribe el tema del caso.'; return; }
+  const finalizing = !record.closed && values.state === 'closed';
+  const responseOffice = finalizing ? values.responseOffice.trim() : '';
+  if (finalizing && (!actualOffice(responseOffice) || !/\d/.test(responseOffice))) {
+    errorText.textContent = 'Ingresa el número de oficio de respuesta para finalizar el caso.';
+    return;
+  }
+  let refresh = false;
   busy = true;
   const request = generation;
   const button = form.querySelector('.primary');
   button.disabled = true;
   try {
-    const { error } = await client.rpc('risk_edit_assigned_case', {
+    const { data: closedAt, error } = await client.rpc('risk_update_assigned_case', {
       p_case_id: record.id, p_topic: topic, p_department: values.department, p_notes: values.notes.trim(),
-      p_expected_topic: record.topic ?? '', p_expected_department: record.department ?? '', p_expected_notes: record.notes ?? ''
+      p_response_office: finalizing ? responseOffice : null,
+      p_expected_topic: record.topic ?? '', p_expected_department: record.department ?? '', p_expected_notes: record.notes ?? '', p_expected_closed: Boolean(record.closed)
     });
     if (request !== generation) return;
     if (error) throw error;
     data = { ...data, cases: data.cases.map(item => item.id === record.id
-      ? { ...item, topic, department: values.department, notes: values.notes.trim() } : item) };
+      ? { ...item, topic, department: values.department, notes: values.notes.trim(),
+        ...(finalizing ? {closed: true, closedAt, responseOffice} : {}) } : item) };
     if (dialog.open && dialog.contains(form)) dialog.close();
     render();
-    notify('Caso actualizado.');
+    notify(finalizing ? 'Caso finalizado.' : 'Caso actualizado.');
+    refresh = true;
   } catch (error) {
     if (request === generation) errorText.textContent = error.code === '40001' || error.code === '42501'
       ? 'El caso cambió o dejó de estar asignado a ti. Cierra el formulario y pulsa Actualizar.'
@@ -419,6 +429,7 @@ async function saveAnalystCase(record, values, form) {
     if (request === generation) {
       busy = false;
       button.disabled = false;
+      if (refresh) void loadWorkspace({quiet: true});
     }
   }
 }
@@ -461,7 +472,7 @@ function caseEditor(id) {
     `<option value="${escape(person.id)}" ${record.person === person.id ? 'selected' : ''}>${escape(person.name)}${person.active ? '' : ' (inactivo)'}</option>`).join('')}</select></label>
     <div class="fields"><label>Fecha de asignación<input name="assigned" type="date" required value="${escape(record.assigned)}"></label>
     <label>Fecha de plazo<input name="due" type="date" ${record.historical ? '' : 'required'} value="${escape(record.due)}"></label></div>
-    <label>Estado<select name="state"><option value="open">En seguimiento</option><option value="closed" ${record.closed ? 'selected' : ''}>Cerrado</option></select></label>
+    <label>Estado<select name="state"><option value="open">En seguimiento</option><option value="closed" ${record.closed ? 'selected' : ''}>Finalizado</option></select></label>
     <div id="close-fields" class="fields" hidden>
       <label>Fecha de cierre<input name="closedAt" type="date" value="${escape(record.closedAt)}"></label>
       ${field('responseOffice', 'Oficio de respuesta', 100, false)}
@@ -523,7 +534,9 @@ function caseEditor(id) {
   const updateClose = () => {
     const closing = stateSelect.value === 'closed';
     closeFields.hidden = !closing;
-    for (const input of [dateInput, responseInput]) input.disabled = !closing;
+    dateInput.disabled = !closing || analyst;
+    responseInput.disabled = !closing || (analyst && Boolean(record.closed));
+    responseInput.required = closing && !existing?.closed;
     if (closing && !dateInput.value && !existing?.closed) dateInput.value = today();
   };
   stateSelect.addEventListener('change', updateClose);
@@ -532,9 +545,17 @@ function caseEditor(id) {
   updateFields();
   if (analyst) {
     dialog.querySelectorAll('input[name], select[name], textarea[name]').forEach(input => {
-      if (!['topic','department','notes'].includes(input.name)) input.disabled = true;
+      const editable = ['topic','department','notes'];
+      if (!record.closed) editable.push('state','responseOffice');
+      if (!editable.includes(input.name)) input.disabled = true;
     });
   }
+  const submitButton = dialog.querySelector('form .primary');
+  const updateLabel = () => {
+    submitButton.textContent = !existing?.closed && stateSelect.value === 'closed' ? 'Finalizar caso' : 'Guardar';
+  };
+  stateSelect.addEventListener('change', updateLabel);
+  updateLabel();
 }
 function decodeCsv(bytes) {
   const bom = new Uint8Array(bytes, 0, Math.min(2, bytes.byteLength));
@@ -547,7 +568,7 @@ function decodeCsv(bytes) {
     if (encoding !== 'utf-8') throw error;
     text = new TextDecoder('windows-1252').decode(bytes);
   }
-  if (text.includes('�')) throw new Error('El archivo ya contiene caracteres dañados (�). Exporta otra vez desde el Excel original como CSV UTF-8.');
+  if (text.includes(' ')) throw new Error('El archivo ya contiene caracteres dañados ( ). Exporta otra vez desde el Excel original como CSV UTF-8.');
   return text;
 }
 function csvRows(text) {
@@ -627,8 +648,8 @@ function prepareImport(text) {
         const original = get(field);
         const characters = [...previous];
         const candidates = [...original];
-        if (previous.includes('�') && characters.length === candidates.length &&
-            characters.every((character, index) => character === '�' || character === candidates[index])) {
+        if (previous.includes(' ') && characters.length === candidates.length &&
+            characters.every((character, index) => character === ' ' || character === candidates[index])) {
           changes[field] = original;
         }
       }
@@ -794,7 +815,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=7');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=8');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;
