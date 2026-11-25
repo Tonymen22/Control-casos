@@ -45,3 +45,11 @@ main.gated{margin:0;max-width:none;display:grid;min-height:100dvh;place-items:ce
 .case-detail dt{font-weight:650}
 .case-detail dd{margin:0;color:var(--muted)}
 @media(max-width:800px){aside.analyst-nav nav{grid-template-columns:repeat(2,1fr)}}
+
+.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:16px;margin-bottom:20px}
+.table-scroll{overflow:auto;margin-top:10px}
+.dashboard-table table{width:100%;border-collapse:collapse;font-size:14px}
+.dashboard-table th,.dashboard-table td{padding:9px 7px;text-align:left;border-bottom:1px solid var(--line)}
+.dashboard-table td{text-align:center}
+.import-errors{max-height:200px;overflow:auto;padding-left:20px}
+textarea{box-sizing:border-box;resize:vertical;font:inherit;border:1px solid #ccd7ea;border-radius:11px;padding:10px;color:inherit}
