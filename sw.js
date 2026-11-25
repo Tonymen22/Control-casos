@@ -1,5 +1,5 @@
-const cacheName = 'gestion-riesgos-shell-v7';
-const assets = ['./index.html', './style.css?v=7', './app.js?v=7', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
+const cacheName = 'gestion-riesgos-shell-v8';
+const assets = ['./index.html', './style.css?v=8', './app.js?v=8', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(assets)));
 });
