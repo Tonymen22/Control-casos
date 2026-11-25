@@ -251,13 +251,26 @@ function caseRows(records, empty) {
   if (!records.length) return '<p class="empty">' + escape(empty) + '</p>';
   return records.map(record => {
     const [label, tone] = status(record);
-    return `<article class="case row"><button data-edit-case="${escape(record.id)}"><strong>${escape(record.topic)}</strong>
-      <small>Caso ${escape(record.number || 'sin número')}${record.matrix ? ' · ' + escape(record.matrix) : ''}${record.office ? ' · Oficio ' + escape(record.office) : ''}</small>
-      <small>${escape(nameOf(record.person))} · Plazo ${formatDate(record.due)}</small>
-      <small>${escape(typeOf(record)?.name)}${record.department ? ' · ' + escape(entryOf('departments', record.department)?.name) : ''}</small>
-      ${record.researcher ? `<small>Investigación · ${escape(entryOf('researchers', record.researcher)?.name)}</small>` : ''}
-      ${record.origin ? `<small>Oficio de la matriz enviada · ${escape(record.origin)}</small>` : ''}</button>
-      <span class="pill ${tone}">${label}</span></article>`;
+    const deadlineTone = !record.due ? 'neutral' : !record.closed && tone === 'late' ? 'late'
+      : !record.closed && tone === 'soon' ? 'soon' : 'dated';
+    const badge = (caption, value, color) => `<span class="case-badge badge-${color}">
+      <span>${caption}</span><b>${escape(value)}</b></span>`;
+    return `<article class="case case-card"><button type="button" class="case-card-open" data-edit-case="${escape(record.id)}">
+      <span class="case-card-heading">
+        <strong class="case-title">${escape(record.topic)}</strong><span class="pill ${tone}">${label}</span>
+      </span>
+      <span class="case-references">Caso ${escape(record.number || 'sin número')}${record.matrix ? ' · ' + escape(record.matrix) : ''}${record.office ? ' · Oficio ' + escape(record.office) : ''}</span>
+      <span class="case-badges">
+        ${badge('Analista', nameOf(record.person), 'person')}
+        ${badge('Dependencia', entryOf('departments', record.department)?.name ?? 'Sin asignar', 'department')}
+        ${badge('Plazo', formatDate(record.due), deadlineTone)}
+        ${record.closedAt ? badge('Cierre', formatDate(record.closedAt), 'closed') : ''}
+      </span>
+      <span class="case-extra">${escape(typeOf(record)?.name)}
+        ${record.researcher ? ' · Investigación: ' + escape(entryOf('researchers', record.researcher)?.name) : ''}
+        ${record.origin ? ' · Oficio de la matriz enviada: ' + escape(record.origin) : ''}
+      </span></button></article>`;
+
   }).join('');
 }
 const caseGroupLabel = (kind, record) => kind === 'people'
@@ -866,7 +879,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=10');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=11');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;
