@@ -64,6 +64,7 @@ let query = '';
 let filter = '';
 let drillFilter = null;
 let caseTab = '';
+let caseSort = 'correlativo';
 let noticeTimer;
 const dateFormat = new Intl.DateTimeFormat('es-GT', { dateStyle: 'medium', timeZone: 'UTC' });
 const monthFormat = new Intl.DateTimeFormat('es-GT', { month: 'long', year: 'numeric', timeZone: 'UTC' });
@@ -314,8 +315,28 @@ function caseRows(records, empty) {
 
   }).join('');
 }
-const caseGroupLabel = (kind, record) => kind === 'people'
-  ? nameOf(record.person) : entryOf('departments', record.department)?.name ?? 'Sin dependencia registrada';
+const caseGroupLabel = (kind, record) => {
+  if (kind === 'people') return nameOf(record.person);
+  if (kind === 'types') return typeOf(record)?.name ?? 'Sin tipo';
+  return entryOf('departments', record.department)?.name ?? 'Sin dependencia registrada';
+};
+function byCorrelative(a,b) {
+  const first = correlate(caseIdentifier(a)), second = correlate(caseIdentifier(b));
+  if (first && second) return Number(second.year) - Number(first.year) ||
+    second.sequence - first.sequence || compareNames(first.prefix,second.prefix) || compareNames(a.topic ?? '',b.topic ?? '');
+  if (first || second) return first ? -1 : 1;
+  return compareNames(a.topic ?? '',b.topic ?? '');
+}
+const caseOrders = {
+  correlativo: ['Correlativo ↓', byCorrelative],
+  ascendente: ['Correlativo ↑', (a,b) =>
+    Boolean(correlate(caseIdentifier(a))) !== Boolean(correlate(caseIdentifier(b))) ? byCorrelative(a,b) : byCorrelative(b,a)],
+  analista: ['Analista A–Z', (a,b) => compareNames(nameOf(a.person),nameOf(b.person)) || byCorrelative(a,b)],
+  tema: ['Tema A–Z', (a,b) => compareNames(a.topic ?? '',b.topic ?? '') || byCorrelative(a,b)],
+  plazo: ['Plazo más próximo', sortDue],
+  asignacion: ['Asignación más reciente', (a,b) => (b.assigned ?? '').localeCompare(a.assigned ?? '') || byCorrelative(a,b)]
+};
+
 
 function dashboard() {
   const open = data.cases.filter(record => !record.closed);
@@ -360,7 +381,7 @@ function dashboard() {
     const totalOf = ([opened, closed]) => Number(opened) + Number(closed);
     const rows = [...groups].sort(([a, av], [b, bv]) => totalOf(bv) - totalOf(av) || compareNames(a,b));
     const drillAttrs = label => {
-      const allowed = kind === 'departments' || (kind === 'people' && (canManage() ||
+      const allowed = kind === 'types' || kind === 'departments' || (kind === 'people' && (canManage() ||
         (role === 'risk' && analystCatalogId && nameOf(analystCatalogId) === label)));
       return allowed ? `data-drill-kind="${kind}" data-drill-label="${escape(label)}"
         aria-label="Ver casos de ${escape(label)}"` : '';
@@ -372,7 +393,7 @@ function dashboard() {
         const [opened, closed] = values;
         const attrs = drillAttrs(label);
         const tag = attrs ? 'button' : 'div';
-        return `<${tag} class="chart-row" ${attrs}><span class="chart-caption"><span>${escape(label)}</span><strong>${totalOf(values)}</strong></span>
+        return `<${tag} class="chart-row ${attrs ? 'dashboard-action dashboard-chart-action' : ''}" ${attrs}><span class="chart-caption"><span>${escape(label)}</span><span class="chart-end"><strong>${totalOf(values)}</strong>${attrs ? '<span class="dashboard-chevron" aria-hidden="true">›</span>' : ''}</span></span>
           <span class="chart-track"><span style="width:${100 * opened / maximum}%"></span><span style="width:${100 * closed / maximum}%"></span></span></${tag}>`;
       }).join('')}</div>
       ${rows.length > 6 ? '<p class="chart-note">Gráfica de los seis grupos con más casos.</p>' : ''}
@@ -380,14 +401,14 @@ function dashboard() {
       <thead><tr><th>${column}</th><th aria-sort="descending">Total</th><th>Abiertos</th><th>Cerrados</th><th>Vencidos</th></tr></thead><tbody>
       ${rows.map(([label, values]) => {
         const attrs = drillAttrs(label);
-        return `<tr><th scope="row">${attrs ? `<button class="drill-link" ${attrs}>${escape(label)}</button>` : escape(label)}</th><td><strong>${totalOf(values)}</strong></td>${values.map(value => `<td>${value}</td>`).join('')}</tr>`; }).join('')}</tbody></table></div>` :
+        return `<tr><th scope="row">${attrs ? `<button type="button" class="dashboard-action dashboard-table-action" ${attrs}><span>${escape(label)}</span><span class="dashboard-chevron" aria-hidden="true">›</span></button>` : escape(label)}</th><td><strong>${totalOf(values)}</strong></td>${values.map(value => `<td>${value}</td>`).join('')}</tr>`; }).join('')}</tbody></table></div>` :
       '<p class="empty">Sin casos registrados.</p>'}</section>`;
 
   };
   return `<div class="stats">${counts.map(([label, count], index) => `<div class="card stat stat-${index}"><span>${label}</span><strong>${count}</strong></div>`).join('')}</div>
     <div class="dashboard-grid">
     ${breakdown('Carga por analista', 'Analista', 'people', record => caseGroupLabel('people', record))}
-    ${breakdown('Casos por tipo', 'Tipo', 'types', record => typeOf(record)?.name ?? 'Sin tipo')}
+    ${breakdown('Casos por tipo', 'Tipo', 'types', record => caseGroupLabel('types', record))}
     ${breakdown('Casos por dependencia', 'Dependencia', 'departments', record => caseGroupLabel('departments', record))}
     </div>
     ${canManage() ? `<section class="card followup-reminders"><h2 class="section-title">Seguimientos por iniciar</h2>
@@ -402,17 +423,20 @@ function filteredCases() {
   const matches = data.cases.filter(record => (!filter || record.person === filter) && (!caseTab || caseMode(record) === caseTab) &&
     (!drillFilter || caseGroupLabel(drillFilter.kind, record) === drillFilter.label) &&
     normalize([record.topic, record.number, record.matrix, record.followupNumber, record.office, record.responseOffice, nameOf(record.person), typeOf(record)?.name, entryOf('departments', record.department)?.name].join(' ')).includes(normalize(query.trim())));
-  main.querySelector('#case-results').innerHTML = caseRows(matches.sort(sortDue), 'No hay casos que coincidan.');
+  main.querySelector('#case-results').innerHTML = caseRows(matches.sort(caseOrders[caseSort][1]), 'No hay casos que coincidan.');
 }
 function cases() {
   const tabs = [['','Todos'], ...Object.entries(caseCategories)];
   return `<section class="card"><div class="case-tabs" role="group" aria-label="Tipo de caso">
     ${tabs.map(([mode,label]) => `<button type="button" class="case-tab case-kind-${mode || 'all'}" data-case-tab="${mode}"
       aria-pressed="${mode === caseTab}">${label}</button>`).join('')}</div>${drillFilter ? `<div class="toolbar active-filter">
-    <span><strong>${drillFilter.kind === 'people' ? 'Analista' : 'Dependencia solicitante'}</strong> · ${escape(drillFilter.label)}</span>
+    <span><strong>${({people:'Analista', departments:'Dependencia solicitante', types:'Tipo de caso'})[drillFilter.kind]}</strong> · ${escape(drillFilter.label)}</span>
     <button class="action" data-clear-drill>Limpiar filtro</button></div>` : ''}<div class="toolbar"><input id="search" type="search" aria-label="Buscar casos" placeholder="Buscar por correlativo, caso, oficio o tema" value="${escape(query)}">
     <select id="filter" aria-label="Filtrar por analista"><option value="">Todos los analistas</option>${sortedCatalog('people').map(person =>
-    `<option value="${escape(person.id)}" ${filter === person.id ? 'selected' : ''}>${escape(person.name)}</option>`).join('')}</select></div><div id="case-results"></div></section>`;
+    `<option value="${escape(person.id)}" ${filter === person.id ? 'selected' : ''}>${escape(person.name)}</option>`).join('')}</select><label class="case-sort-label">Ordenar por
+      <select id="case-sort">${Object.entries(caseOrders).map(([key,[label]]) =>
+        `<option value="${key}" ${caseSort === key ? 'selected' : ''}>${label}</option>`).join('')}</select>
+    </label></div><div id="case-results"></div></section>`;
 }
 function matrixResponse(value) {
   const match = /^ST\s*\/\s*DIPT\s*\/\s*DRIGCT\s+No\.?\s*(\d+)$/i.exec((value ?? '').trim());
@@ -941,9 +965,13 @@ document.addEventListener('click', event => {
     void save(localData, 'Datos importados a Supabase.');
   }
   if (!ready) return;
-  if ('drillKind' in dataset && view === 'dashboard' && ['people','departments'].includes(dataset.drillKind)) {
+  if ('drillKind' in dataset && view === 'dashboard' && ['people','departments','types'].includes(dataset.drillKind)) {
     drillFilter = {kind:dataset.drillKind, label:dataset.drillLabel};
-    caseTab = '';
+    const type = dataset.drillKind === 'types'
+      ? data.types.find(type => type.name === dataset.drillLabel) ??
+        initial.types.find(type => type.name === dataset.drillLabel)
+      : null;
+    caseTab = type?.mode ?? '';
     filter = '';
     query = '';
     view = 'cases';
@@ -953,6 +981,12 @@ document.addEventListener('click', event => {
   }
   if ('caseTab' in dataset && view === 'cases' && (dataset.caseTab === '' || Object.hasOwn(caseCategories,dataset.caseTab))) {
     caseTab = dataset.caseTab;
+    if (drillFilter?.kind === 'types') {
+      drillFilter = null;
+      render();
+      [...main.querySelectorAll('[data-case-tab]')].find(tab => tab.dataset.caseTab === caseTab)?.focus();
+      return;
+    }
     main.querySelectorAll('[data-case-tab]').forEach(tab => tab.setAttribute('aria-pressed', String(tab.dataset.caseTab === caseTab)));
     filteredCases();
   }
@@ -991,6 +1025,10 @@ main.addEventListener('input', event => {
   if (event.target.id === 'search') { query = event.target.value; filteredCases(); }
 });
 main.addEventListener('change', event => {
+  if (event.target.id === 'case-sort' && Object.hasOwn(caseOrders,event.target.value)) {
+    caseSort = event.target.value;
+    filteredCases();
+  }
   if (event.target.id === 'filter') { filter = event.target.value; filteredCases(); }
 });
 document.addEventListener('submit', async event => {
@@ -1023,7 +1061,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=13');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=14');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;
