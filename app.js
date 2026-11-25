@@ -42,6 +42,7 @@ try {
 let client;
 let account;
 let role;
+let globalDashboard;
 const canManage = () => role === 'admin';
 let revision;
 let ready = false;
@@ -143,6 +144,10 @@ async function loadWorkspace({ quiet = false } = {}) {
         '<div class="buttons gate-actions"><button class="action" data-logout>Cerrar sesión</button><button class="action primary" data-reload>Reintentar</button></div>');
       return;
     }
+    const summary = admin ? null : await client.rpc('risk_global_dashboard');
+    if (request !== generation) return;
+    if (summary?.error || (summary && !summary.data)) throw new Error('Dashboard no disponible');
+    globalDashboard = summary?.data;
     if (role !== nextRole) {
       view = admin ? 'dashboard' : 'cases';
       filter = '';
@@ -150,6 +155,7 @@ async function loadWorkspace({ quiet = false } = {}) {
     }
     role = nextRole;
     data = (admin ? result.data?.payload : result.data) ?? initial;
+    if (!admin && globalDashboard.departments.length) data = { ...data, departments: globalDashboard.departments };
     revision = admin ? result.data?.revision ?? null : null;
     ready = true;
     render();
@@ -171,6 +177,7 @@ function activateSession(session) {
   generation++;
   account = user;
   role = undefined;
+  globalDashboard = undefined;
   ready = false;
   busy = false;
   data = initial;
@@ -257,21 +264,33 @@ function dashboard() {
   const onTime = measurable.filter(record => record.closedAt <= record.due).length;
   const elapsed = closed.filter(record => record.closedAt && record.assigned && record.closedAt >= record.assigned)
     .map(record => (Date.parse(record.closedAt) - Date.parse(record.assigned)) / 86400000);
+  const metrics = globalDashboard?.metrics ?? {
+    total: data.cases.length, opened: open.length, closed: closed.length, upcoming: upcoming.length, overdue: overdue.length,
+    undated: open.length - remaining.length, closed_month: closed.filter(record => record.closedAt?.startsWith(currentMonth)).length,
+    measurable: measurable.length, on_time: onTime, average_days: elapsed.length ? elapsed.reduce((a,b) => a+b,0) / elapsed.length : null
+  };
   const counts = [
-    ['Total de casos', data.cases.length], ['Abiertos', open.length], ['Cerrados', closed.length],
-    ['Vencen en 7 días', upcoming.length], ['Vencidos', overdue.length], ['Abiertos sin plazo', open.length - remaining.length],
-    ['Cerrados este mes', closed.filter(record => record.closedAt?.startsWith(currentMonth)).length],
-    ['Cerrados a tiempo', measurable.length ? onTime + ' / ' + measurable.length : '—'],
-    ['Promedio de cierre (días calendario)', elapsed.length ? new Intl.NumberFormat('es-GT', {maximumFractionDigits:1}).format(elapsed.reduce((a,b) => a+b,0) / elapsed.length) : '—']
+    ['Total de casos', metrics.total], ['Abiertos', metrics.opened], ['Cerrados', metrics.closed],
+    ['Vencen en 7 días', metrics.upcoming], ['Vencidos', metrics.overdue], ['Abiertos sin plazo', metrics.undated],
+    ['Cerrados este mes', metrics.closed_month],
+    ['Cerrados a tiempo', metrics.measurable ? metrics.on_time + ' / ' + metrics.measurable : '—'],
+    ['Promedio de cierre (días calendario)', metrics.average_days == null ? '—' :
+      new Intl.NumberFormat('es-GT', {maximumFractionDigits:1}).format(metrics.average_days)]
   ];
-  const breakdown = (title, column, labelOf) => {
+  const breakdown = (title, column, kind, labelOf) => {
     const groups = new Map();
-    for (const record of data.cases) {
-      const label = labelOf(record);
-      const values = groups.get(label) ?? [0,0,0];
-      values[record.closed ? 1 : 0]++;
-      if (!record.closed && record.due && record.due < todayDate) values[2]++;
-      groups.set(label, values);
+    if (globalDashboard) {
+      for (const row of globalDashboard.groups.filter(row => row.kind === kind)) {
+        groups.set(row.label, [row.opened, row.closed, row.overdue]);
+      }
+    } else {
+      for (const record of data.cases) {
+        const label = labelOf(record);
+        const values = groups.get(label) ?? [0,0,0];
+        values[record.closed ? 1 : 0]++;
+        if (!record.closed && record.due && record.due < todayDate) values[2]++;
+        groups.set(label, values);
+      }
     }
     return `<section class="card dashboard-table"><h2>${title}</h2>${groups.size ? `<div class="table-scroll"><table>
       <thead><tr><th>${column}</th><th>Abiertos</th><th>Cerrados</th><th>Vencidos</th></tr></thead><tbody>
@@ -279,13 +298,13 @@ function dashboard() {
         `<tr><th scope="row">${escape(label)}</th>${values.map(value => `<td>${value}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` :
       '<p class="empty">Sin casos registrados.</p>'}</section>`;
   };
-  return `<div class="stats">${counts.map(([label, count]) => `<div class="card stat"><span>${label}</span><strong>${count}</strong></div>`).join('')}</div>
+  return `<div class="stats">${counts.map(([label, count], index) => `<div class="card stat stat-${index}"><span>${label}</span><strong>${count}</strong></div>`).join('')}</div>
     <div class="dashboard-grid">
-    ${breakdown('Carga por analista', 'Analista', record => nameOf(record.person))}
-    ${breakdown('Casos por tipo', 'Tipo', record => typeOf(record)?.name ?? 'Sin tipo')}
-    ${breakdown('Casos por dependencia', 'Dependencia', record => entryOf('departments', record.department)?.name ?? 'Sin dependencia registrada')}
+    ${breakdown('Carga por analista', 'Analista', 'people', record => nameOf(record.person))}
+    ${breakdown('Casos por tipo', 'Tipo', 'types', record => typeOf(record)?.name ?? 'Sin tipo')}
+    ${breakdown('Casos por dependencia', 'Dependencia', 'departments', record => entryOf('departments', record.department)?.name ?? 'Sin dependencia registrada')}
     </div>
-    <section class="card"><h2 class="section-title">Plazos pendientes</h2>${caseRows(remaining.sort(sortDue).slice(0, 8), 'Aquí aparecerán los plazos de los casos abiertos.')}</section>`;
+    <section class="card"><h2 class="section-title">${canManage() ? 'Plazos pendientes' : 'Mis próximos plazos'}</h2>${caseRows(remaining.sort(sortDue).slice(0, 8), 'Aquí aparecerán los plazos de los casos abiertos.')}</section>`;
 }
 function filteredCases() {
   const matches = data.cases.filter(record => (!filter || record.person === filter) &&
@@ -357,38 +376,51 @@ function render() {
     ? '<div class="card import-card"><p>Hay datos de una versión anterior en este dispositivo.</p><button class="action" data-import>Importar a esta cuenta</button></div>'
     : '';
   document.querySelectorAll('nav button').forEach(button => {
-    button.hidden = !canManage() && !['cases', 'calendar'].includes(button.dataset.view);
+    button.hidden = !canManage() && button.dataset.view === 'people';
     if (button.dataset.view === view) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
   });
   const [title, description] = !canManage() && view === 'cases'
-    ? ['Mis casos', 'Consulta tus asignaciones y fechas de plazo.'] : views[view];
+    ? ['Mis casos', 'Consulta y actualiza los casos que tienes asignados.'] :
+    !canManage() && view === 'dashboard' ? ['Dashboard global', 'Consulta los indicadores y la carga de trabajo de todo el equipo.'] : views[view];
   const action = !canManage() || view === 'people' ? '' :
     '<button class="action primary" data-edit-case="">+ Nuevo caso</button>' + (view === 'cases' ? ' <button class="action" data-csv>Importar Excel</button>' : '');
-  main.innerHTML = `<header><div><div class="eyebrow">Gestión de Riesgos</div><h1>${title}</h1><p>${description}</p></div>${action}</header>
+  main.innerHTML = `<header><div><div class="eyebrow">Gestión de Riesgos</div><h1>${title}</h1><p>${description}</p></div>${action ? `<div class="header-actions">${action}</div>` : ''}</header>
     ${importButton}
     ${({ dashboard, cases, calendar, people })[view]()}`;
   if (view === 'cases') filteredCases();
 }
-function showCase(id) {
-  const record = data.cases.find(item => item.id === id);
-  if (!record) return;
-  const fields = [
-    ['Oficio de ingreso', record.office], ['Número de caso', record.number], ['Número de matriz', record.matrix],
-    ['Tipo de caso', typeOf(record)?.name], ['Dependencia solicitante', entryOf('departments', record.department)?.name],
-    ['Analista de riesgos', nameOf(record.person)],
-    ['Responsable de investigación', entryOf('researchers', record.researcher)?.name],
-    ['Oficio de la matriz enviada', record.origin],
-    ['Fecha de asignación', formatDate(record.assigned)], ['Fecha de plazo', formatDate(record.due)],
-    ['Estado', status(record)[0]], ['Fecha de cierre', record.closedAt ? formatDate(record.closedAt) : ''],
-    ['Oficio de respuesta', record.responseOffice], ['Observaciones', record.notes]
-  ];
-  dialog.innerHTML = `<div class="row"><h2 id="dialog-title">${escape(record.topic)}</h2>
-    <button type="button" class="action" data-cancel aria-label="Cerrar">×</button></div>
-    <dl class="case-detail">${fields.filter(([, value]) => value).map(([label, value]) =>
-      `<dt>${label}</dt><dd>${escape(value)}</dd>`).join('')}</dl>`;
-  dialog.setAttribute('aria-labelledby', 'dialog-title');
-  if (!dialog.open) dialog.showModal();
+async function saveAnalystCase(record, values, form) {
+  const errorText = form.querySelector('.error');
+  if (!ready || canManage() || busy) return;
+  const topic = values.topic.trim();
+  if (!topic) { errorText.textContent = 'Escribe el tema del caso.'; return; }
+  busy = true;
+  const request = generation;
+  const button = form.querySelector('.primary');
+  button.disabled = true;
+  try {
+    const { error } = await client.rpc('risk_edit_assigned_case', {
+      p_case_id: record.id, p_topic: topic, p_department: values.department, p_notes: values.notes.trim(),
+      p_expected_topic: record.topic ?? '', p_expected_department: record.department ?? '', p_expected_notes: record.notes ?? ''
+    });
+    if (request !== generation) return;
+    if (error) throw error;
+    data = { ...data, cases: data.cases.map(item => item.id === record.id
+      ? { ...item, topic, department: values.department, notes: values.notes.trim() } : item) };
+    if (dialog.open && dialog.contains(form)) dialog.close();
+    render();
+    notify('Caso actualizado.');
+  } catch (error) {
+    if (request === generation) errorText.textContent = error.code === '40001' || error.code === '42501'
+      ? 'El caso cambió o dejó de estar asignado a ti. Cierra el formulario y pulsa Actualizar.'
+      : 'No se pudo guardar. Comprueba la dependencia seleccionada y vuelve a intentar.';
+  } finally {
+    if (request === generation) {
+      busy = false;
+      button.disabled = false;
+    }
+  }
 }
 function openForm(title, fields, submit, deleteAttrs = '') {
   dialog.innerHTML = `<div class="row"><h2 id="dialog-title">${title}</h2><button type="button" class="action" data-cancel aria-label="Cerrar">×</button></div>
@@ -402,16 +434,19 @@ function openForm(title, fields, submit, deleteAttrs = '') {
   if (!dialog.open) dialog.showModal();
 }
 function caseEditor(id) {
+  const analyst = !canManage();
   const existing = data.cases.find(record => record.id === id);
+  if (analyst && !existing) return;
   const record = existing ?? { assigned: today() };
   const currentType = existing ? record.type ?? 'matrix' : '';
   const options = data.people.filter(person => person.active || person.id === record.person);
-  if (!options.length) {
+  if (!analyst && !options.length) {
     notify('Activa o añade un analista antes de asignar un caso.');
     return;
   }
   const field = (key, label, limit, required = true) => `<label>${label}<input name="${key}" value="${escape(record[key])}" maxlength="${limit}" ${required ? 'required' : ''}></label>`;
   openForm(existing ? 'Editar caso' : 'Nuevo caso', `
+    ${analyst ? '<p class="edit-scope">Puedes editar el tema, la dependencia solicitante y las observaciones.</p>' : ''}
     <div class="fields">${field('office', 'Oficio de ingreso', 100, !record.historical)}${field('number', 'Número de caso', 100, !record.historical)}</div>
     ${field('matrix', 'Número de matriz', 100, false)}
     ${field('topic', 'Tema', 300)}
@@ -433,6 +468,7 @@ function caseEditor(id) {
     </div>
     <label>Observaciones<textarea name="notes" rows="2">${escape(record.notes)}</textarea></label>`,
     (form, values) => {
+      if (analyst) { void saveAnalystCase(record, values, form); return; }
       const { person, assigned, due, state, type, department } = values;
       const mode = entryOf('types', type)?.mode;
       const researcher = mode === 'research' ? values.researcher : '';
@@ -465,7 +501,7 @@ function caseEditor(id) {
       const item = { ...record, id: id || crypto.randomUUID(), office, number, matrix, topic, person, assigned, due,
         type, department, researcher, origin, closed, closedAt, responseOffice, notes: values.notes.trim() };
       save({ ...data, cases: existing ? data.cases.map(entry => entry.id === id ? item : entry) : [...data.cases, item] }, 'Caso guardado.');
-    }, existing ? `<button type="button" class="action danger" data-delete-case="${escape(id)}">Eliminar</button>` : '');
+    }, existing && !analyst ? `<button type="button" class="action danger" data-delete-case="${escape(id)}">Eliminar</button>` : '');
   const typeSelect = dialog.querySelector('[name="type"]');
   const updateFields = () => {
     const mode = entryOf('types', typeSelect.value)?.mode;
@@ -494,6 +530,11 @@ function caseEditor(id) {
   updateClose();
   typeSelect.addEventListener('change', updateFields);
   updateFields();
+  if (analyst) {
+    dialog.querySelectorAll('input[name], select[name], textarea[name]').forEach(input => {
+      if (!['topic','department','notes'].includes(input.name)) input.disabled = true;
+    });
+  }
 }
 function decodeCsv(bytes) {
   const bom = new Uint8Array(bytes, 0, Math.min(2, bytes.byteLength));
@@ -695,8 +736,8 @@ document.addEventListener('click', event => {
     void save(localData, 'Datos importados a Supabase.');
   }
   if (!ready) return;
-  if ('view' in dataset && (canManage() || ['cases','calendar'].includes(dataset.view))) { view = dataset.view; render(); window.scrollTo(0, 0); }
-  if ('editCase' in dataset) (canManage() ? caseEditor : showCase)(dataset.editCase);
+  if ('view' in dataset && (canManage() || ['dashboard','cases','calendar'].includes(dataset.view))) { view = dataset.view; render(); window.scrollTo(0, 0); }
+  if ('editCase' in dataset) caseEditor(dataset.editCase);
   if (canManage() && 'csv' in dataset) openCsvImport();
   if (canManage() && 'catalog' in dataset) catalogEditor(dataset.catalog, dataset.entry);
   if ('cancel' in dataset) dialog.close();
@@ -753,7 +794,7 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   showGate('Gestión de Riesgos', 'Preparando el inicio de sesión…');
   try {
-    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=6');
+    const { projectUrl, publishableKey } = await import('./supabase-config.js?v=7');
     if (!projectUrl || !publishableKey) {
       showGate('Configurar Supabase', 'Completa supabase-config.js y ejecuta supabase.sql para habilitar el inicio de sesión.');
       return;
