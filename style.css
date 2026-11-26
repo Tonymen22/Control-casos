@@ -225,3 +225,8 @@ button.dashboard-chart-action .chart-caption>span{color:inherit;text-decoration:
 .agenda-overdue{border-inline-start-color:#c66378}
 .agenda-upcoming{border-inline-start-color:#d4a143}
 .agenda-undated{border-inline-start-color:#8584aa}
+
+.pill.in-review,.pending-review{background:#efe8ff;color:#58358c}
+.agenda-review{border-inline-start-color:#8968bc}
+.closure-review{display:grid;gap:8px;padding:12px;border:1px solid #d9ccf0;border-radius:12px;background:#f6f0ff;color:#4e317a}
+.closure-review p{color:#4e426a}
