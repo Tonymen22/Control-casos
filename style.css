@@ -215,3 +215,13 @@ button.dashboard-chart-action .chart-caption>span{color:inherit;text-decoration:
 @media print{
   .report-heading,.report-stats,.report-reconcile{break-inside:avoid}
 }
+
+.agenda-summary{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:12px}
+.agenda-summary p{margin-top:4px}
+.agenda-summary label{max-width:100%;min-width:min(100%,170px)}
+.agenda-section{margin-bottom:12px;border-inline-start:4px solid #8ba7ce}
+.agenda-section h2{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.agenda-section .event-reminder{margin-top:8px}
+.agenda-overdue{border-inline-start-color:#c66378}
+.agenda-upcoming{border-inline-start-color:#d4a143}
+.agenda-undated{border-inline-start-color:#8584aa}
